@@ -594,7 +594,8 @@ class MonitorService:
     def run_scan_phase(
         self,
         mode: Optional[str] = None,
-        is_baseline: bool = False
+        is_baseline: bool = False,
+        notify_cohorts: bool = False
     ) -> Tuple[int, int]:
         """
         Execute the scan phase of the monitor loop.
@@ -614,6 +615,8 @@ class MonitorService:
                          - Reset baseline_position_keys
                          - Full watchlist replacement
                          - Alerts compare against previous baseline
+            notify_cohorts: If True, send Telegram notification when each cohort starts.
+                           Only used during startup progressive scan.
 
         Returns:
             Tuple of (total_positions, new_positions_count)
@@ -662,18 +665,20 @@ class MonitorService:
                 logger.error("Failed to fetch mark prices")
                 return 0, 0
 
-            # Create callback for cohort transition notifications
-            last_cohort = [None]  # Use list for mutable closure
+            # Create callback for cohort notifications (only during startup)
+            progress_callback = None
+            if notify_cohorts:
+                last_cohort = [None]  # Use list for mutable closure
 
-            def progress_callback(processed, total, positions_found, cohort):
-                if cohort != last_cohort[0]:
-                    last_cohort[0] = cohort
-                    self.alerts.send_cohort_start(
-                        cohort=cohort,
-                        phase_name=scan_mode.replace("-", " ").title()
-                    )
+                def progress_callback(processed, total, positions_found, cohort):
+                    if cohort != last_cohort[0]:
+                        last_cohort[0] = cohort
+                        self.alerts.send_cohort_start(
+                            cohort=cohort,
+                            phase_name=scan_mode.replace("-", " ").title()
+                        )
 
-            # Fetch positions with cohort notifications
+            # Fetch positions
             positions = fetch_all_positions(
                 addresses, mark_prices, dexes,
                 progress_callback=progress_callback
@@ -1156,7 +1161,7 @@ class MonitorService:
             phase_name="High-priority",
             description="Scanning kraken + large_whale cohorts\nExchanges: main, xyz"
         )
-        total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True)
+        total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True, notify_cohorts=True)
 
         if not self.running:
             return
@@ -1169,7 +1174,7 @@ class MonitorService:
             phase_name="Normal",
             description="Adding whale cohort\nExchanges: main, xyz"
         )
-        total, new_count = self.run_scan_phase(mode="normal", is_baseline=False)
+        total, new_count = self.run_scan_phase(mode="normal", is_baseline=False, notify_cohorts=True)
 
         if not self.running:
             return
@@ -1182,7 +1187,7 @@ class MonitorService:
             phase_name="Comprehensive",
             description="Adding shark cohort\nExchanges: all (main, xyz, flx, vntl, hyna, km)"
         )
-        total, new_count = self.run_scan_phase(mode="comprehensive", is_baseline=False)
+        total, new_count = self.run_scan_phase(mode="comprehensive", is_baseline=False, notify_cohorts=True)
 
         if not self.running:
             return
