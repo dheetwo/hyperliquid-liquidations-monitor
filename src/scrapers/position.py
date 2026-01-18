@@ -11,8 +11,11 @@ Outputs a CSV with columns:
     Address, Token, Side, Size, Leverage, Leverage Type, Entry Price,
     Mark Price, Position Value, Unrealized PnL, ROE, Liquidation Price,
     Margin Used, Funding (Since Open), Cohort
+
+Supports both sync and async modes for API calls.
 """
 
+import asyncio
 import csv
 import logging
 import requests
@@ -21,6 +24,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+import aiohttp
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -61,10 +66,14 @@ PRIORITY_COHORTS = NORMAL_COHORTS
 SECONDARY_COHORTS = ["shark"]
 SUB_EXCHANGES = ["xyz", "flx", "vntl", "hyna", "km"]
 
-# Rate limiting settings
+# Rate limiting settings (sync mode)
 REQUEST_DELAY = 0.2  # seconds between API calls
 BATCH_DELAY = 2.0    # seconds between batches of 50
 DEX_DELAY = 0.1      # seconds between dex queries for same address
+
+# Async concurrency settings
+MAX_CONCURRENT_REQUESTS = 20  # Max concurrent API calls
+ASYNC_REQUEST_DELAY = 0.05    # Small delay between launching requests
 
 
 @dataclass
@@ -379,6 +388,261 @@ def fetch_all_positions(
     logger.info(f"Completed: {total} addresses, {len(all_positions)} positions found "
                f"({sub_exchange_positions} from sub-exchanges)")
     return all_positions
+
+
+# =============================================================================
+# ASYNC FUNCTIONS
+# =============================================================================
+
+async def async_fetch_positions_for_dex(
+    session: aiohttp.ClientSession,
+    address: str,
+    dex: str = ""
+) -> List[Dict[str, Any]]:
+    """
+    Async version: Fetch positions for a single address from a specific exchange.
+
+    Args:
+        session: aiohttp ClientSession
+        address: Wallet address
+        dex: Exchange identifier ("" for main, "xyz", "flx")
+
+    Returns:
+        List of position dicts from API response
+    """
+    try:
+        payload = {
+            "type": "clearinghouseState",
+            "user": address
+        }
+        if dex:
+            payload["dex"] = dex
+
+        async with session.post(HYPERLIQUID_API, json=payload, timeout=30) as response:
+            response.raise_for_status()
+            data = await response.json()
+            return data.get("assetPositions", [])
+
+    except Exception as e:
+        dex_name = dex if dex else "main"
+        logger.debug(f"Failed to fetch {dex_name} positions for {address}: {e}")
+        return []
+
+
+async def async_fetch_all_positions_for_address(
+    session: aiohttp.ClientSession,
+    semaphore: asyncio.Semaphore,
+    address: str,
+    dexes: List[str] = None
+) -> List[Tuple[Dict[str, Any], str]]:
+    """
+    Async version: Fetch positions for a single address across specified exchanges.
+    All exchanges are fetched concurrently.
+
+    Args:
+        session: aiohttp ClientSession
+        semaphore: Semaphore for rate limiting
+        address: Wallet address
+        dexes: List of dex identifiers to query (default: ALL_DEXES)
+
+    Returns:
+        List of (position_dict, exchange_name) tuples
+    """
+    if dexes is None:
+        dexes = ALL_DEXES
+
+    async def fetch_dex(dex: str) -> List[Tuple[Dict[str, Any], str]]:
+        async with semaphore:
+            positions = await async_fetch_positions_for_dex(session, address, dex)
+            exchange_name = dex if dex else "main"
+            return [(pos, exchange_name) for pos in positions]
+
+    # Fetch all exchanges concurrently
+    tasks = [fetch_dex(dex) for dex in dexes]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_positions = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.debug(f"Error fetching positions for {address}: {result}")
+        else:
+            all_positions.extend(result)
+
+    return all_positions
+
+
+async def async_fetch_all_mark_prices(
+    session: aiohttp.ClientSession,
+    semaphore: asyncio.Semaphore
+) -> Dict[str, float]:
+    """
+    Async version: Fetch current mark prices for all perp tokens across all exchanges.
+
+    Args:
+        session: aiohttp ClientSession
+        semaphore: Semaphore for rate limiting
+
+    Returns:
+        Dict mapping token symbol to mark price
+    """
+    async def fetch_dex_prices(dex: str) -> Dict[str, float]:
+        async with semaphore:
+            try:
+                payload = {"type": "allMids"}
+                if dex:
+                    payload["dex"] = dex
+
+                async with session.post(HYPERLIQUID_API, json=payload, timeout=30) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    prices = {token: float(price) for token, price in data.items()}
+                    dex_name = dex if dex else "main"
+                    logger.info(f"Fetched {len(prices)} mark prices from {dex_name} exchange")
+                    return prices
+            except Exception as e:
+                dex_name = dex if dex else "main"
+                logger.error(f"Failed to fetch mark prices from {dex_name}: {e}")
+                return {}
+
+    # Fetch all exchanges concurrently
+    tasks = [fetch_dex_prices(dex) for dex in ALL_DEXES]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_prices = {}
+    for result in results:
+        if isinstance(result, dict):
+            all_prices.update(result)
+
+    logger.info(f"Total mark prices fetched: {len(all_prices)}")
+    return all_prices
+
+
+async def async_fetch_all_positions(
+    addresses: List[Tuple[str, str]],
+    mark_prices: Dict[str, float],
+    dexes: List[str] = None,
+    progress_callback: callable = None
+) -> List[Position]:
+    """
+    Async version: Fetch positions for all addresses with concurrent requests.
+
+    Args:
+        addresses: List of (address, cohort) tuples
+        mark_prices: Dict of token -> mark price
+        dexes: List of dex identifiers to query (default: ALL_DEXES)
+        progress_callback: Optional callback(processed, total, positions_found, cohort)
+
+    Returns:
+        List of all Position objects
+    """
+    if dexes is None:
+        dexes = ALL_DEXES
+
+    all_positions = []
+    total = len(addresses)
+    sub_exchange_positions = 0
+
+    # Group addresses by cohort for progress tracking
+    cohort_indices = {}
+    current_cohort = None
+    for i, (address, cohort) in enumerate(addresses):
+        if cohort != current_cohort:
+            cohort_indices[i] = cohort
+            current_cohort = cohort
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+    async with aiohttp.ClientSession() as session:
+        # Process in batches to allow progress updates and avoid overwhelming the API
+        batch_size = 50
+        for batch_start in range(0, total, batch_size):
+            batch_end = min(batch_start + batch_size, total)
+            batch = addresses[batch_start:batch_end]
+
+            # Check for cohort transitions in this batch and notify
+            for i in range(batch_start, batch_end):
+                if i in cohort_indices:
+                    cohort = cohort_indices[i]
+                    logger.info(f"Starting cohort: {cohort}")
+                    if progress_callback:
+                        try:
+                            progress_callback(i, total, len(all_positions), cohort)
+                        except Exception as e:
+                            logger.debug(f"Progress callback error: {e}")
+
+            # Fetch all addresses in batch concurrently
+            async def fetch_address(addr_tuple):
+                address, cohort = addr_tuple
+                await asyncio.sleep(ASYNC_REQUEST_DELAY)  # Small stagger
+                return (
+                    await async_fetch_all_positions_for_address(session, semaphore, address, dexes),
+                    address,
+                    cohort
+                )
+
+            tasks = [fetch_address(addr_tuple) for addr_tuple in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.debug(f"Error in batch: {result}")
+                    continue
+
+                positions_with_exchange, address, cohort = result
+                for raw_pos, exchange in positions_with_exchange:
+                    position = parse_position(address, cohort, raw_pos, mark_prices, exchange)
+                    if position:
+                        all_positions.append(position)
+                        if exchange != "main":
+                            sub_exchange_positions += 1
+
+            logger.info(f"Progress: {batch_end}/{total} addresses processed "
+                       f"({len(all_positions)} positions, {sub_exchange_positions} from sub-exchanges)")
+
+    logger.info(f"Completed: {total} addresses, {len(all_positions)} positions found "
+               f"({sub_exchange_positions} from sub-exchanges)")
+    return all_positions
+
+
+def fetch_all_positions_async(
+    addresses: List[Tuple[str, str]],
+    mark_prices: Dict[str, float],
+    dexes: List[str] = None,
+    progress_callback: callable = None
+) -> List[Position]:
+    """
+    Sync wrapper for async_fetch_all_positions.
+    Use this to call async version from sync code.
+
+    Args:
+        addresses: List of (address, cohort) tuples
+        mark_prices: Dict of token -> mark price
+        dexes: List of dex identifiers to query (default: ALL_DEXES)
+        progress_callback: Optional callback(processed, total, positions_found, cohort)
+
+    Returns:
+        List of all Position objects
+    """
+    return asyncio.run(async_fetch_all_positions(
+        addresses, mark_prices, dexes, progress_callback
+    ))
+
+
+def fetch_all_mark_prices_async() -> Dict[str, float]:
+    """
+    Sync wrapper for async_fetch_all_mark_prices.
+    Fetches mark prices from all exchanges concurrently.
+
+    Returns:
+        Dict mapping token symbol to mark price
+    """
+    async def _fetch():
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        async with aiohttp.ClientSession() as session:
+            return await async_fetch_all_mark_prices(session, semaphore)
+
+    return asyncio.run(_fetch())
 
 
 def save_to_csv(positions: List[Position], filename: str):

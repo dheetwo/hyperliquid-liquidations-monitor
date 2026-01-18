@@ -39,7 +39,9 @@ from src.scrapers.cohort import fetch_cohorts, save_to_csv as save_cohort_csv, P
 from src.scrapers.position import (
     load_cohort_addresses,
     fetch_all_mark_prices,
+    fetch_all_mark_prices_async,
     fetch_all_positions,
+    fetch_all_positions_async,
     fetch_all_positions_for_address,
     save_to_csv as save_position_csv,
     SCAN_MODES,
@@ -662,8 +664,9 @@ class MonitorService:
                 logger.error("No addresses loaded from cohort data")
                 return 0, 0
 
-            # Fetch mark prices
-            mark_prices = fetch_all_mark_prices()
+            # Fetch mark prices (async for speed)
+            logger.info("Fetching mark prices from all exchanges...")
+            mark_prices = fetch_all_mark_prices_async()
             if not mark_prices:
                 logger.error("Failed to fetch mark prices")
                 return 0, 0
@@ -681,8 +684,9 @@ class MonitorService:
                             phase_name=scan_mode.replace("-", " ").title()
                         )
 
-            # Fetch positions
-            positions = fetch_all_positions(
+            # Fetch positions (async for ~5x speedup)
+            logger.info(f"Fetching positions for {len(addresses)} addresses across {len(dexes)} exchanges (async)...")
+            positions = fetch_all_positions_async(
                 addresses, mark_prices, dexes,
                 progress_callback=progress_callback
             )
@@ -911,8 +915,8 @@ class MonitorService:
 
         while self.running and time.time() < next_scan_time:
             try:
-                # Fetch current prices
-                mark_prices = fetch_all_mark_prices()
+                # Fetch current prices (async for speed)
+                mark_prices = fetch_all_mark_prices_async()
                 if not mark_prices:
                     logger.warning("Failed to fetch mark prices, retrying...")
                     time.sleep(self.poll_interval)
