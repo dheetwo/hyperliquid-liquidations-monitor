@@ -657,12 +657,7 @@ class MonitorService:
             mode_config = SCAN_MODES.get(scan_mode, SCAN_MODES["normal"])
             cohorts = mode_config["cohorts"]
             dexes = mode_config["dexes"]
-
-            # Load addresses
-            addresses = load_cohort_addresses(COHORT_DATA_PATH, cohorts=cohorts)
-            if not addresses:
-                logger.error("No addresses loaded from cohort data")
-                return 0, 0
+            additional_scans = mode_config.get("additional_scans", [])
 
             # Fetch mark prices (async for speed)
             logger.info("Fetching mark prices from all exchanges...")
@@ -684,12 +679,40 @@ class MonitorService:
                             phase_name=scan_mode.replace("-", " ").title()
                         )
 
-            # Fetch positions (async for ~5x speedup)
-            logger.info(f"Fetching positions for {len(addresses)} addresses across {len(dexes)} exchanges (async)...")
-            positions = fetch_all_positions_async(
-                addresses, mark_prices, dexes,
-                progress_callback=progress_callback
-            )
+            all_positions = []
+
+            # Main scan: primary cohorts and dexes
+            addresses = load_cohort_addresses(COHORT_DATA_PATH, cohorts=cohorts)
+            if addresses:
+                logger.info(f"Main scan: {len(addresses)} addresses across {len(dexes)} exchanges (async)...")
+                positions = fetch_all_positions_async(
+                    addresses, mark_prices, dexes,
+                    progress_callback=progress_callback
+                )
+                all_positions.extend(positions)
+                logger.info(f"Main scan found {len(positions)} positions")
+
+            # Additional scans (for incremental modes like shark-incremental)
+            for i, extra_scan in enumerate(additional_scans):
+                extra_cohorts = extra_scan["cohorts"]
+                extra_dexes = extra_scan["dexes"]
+                extra_addresses = load_cohort_addresses(COHORT_DATA_PATH, cohorts=extra_cohorts)
+                if extra_addresses:
+                    logger.info(
+                        f"Additional scan {i+1}: {len(extra_addresses)} addresses "
+                        f"({', '.join(extra_cohorts)}) on {len(extra_dexes)} extra exchanges..."
+                    )
+                    extra_positions = fetch_all_positions_async(
+                        extra_addresses, mark_prices, extra_dexes,
+                        progress_callback=progress_callback
+                    )
+                    all_positions.extend(extra_positions)
+                    logger.info(f"Additional scan found {len(extra_positions)} positions")
+
+            positions = all_positions
+
+            if not positions:
+                logger.warning("No positions found in scan")
 
             # Save to temporary file for filter (with path validation)
             position_file = "data/raw/position_data_monitor.csv"
@@ -1157,10 +1180,12 @@ class MonitorService:
             "Scheduled mode | Progressive startup scan"
         )
 
-        # Progressive startup scan: high-priority -> normal -> comprehensive
-        # This gives fast initial results, then progressively adds more coverage
+        # Progressive startup scan: incremental additions only (no re-scanning)
+        # Phase 1: kraken + large_whale (main, xyz)
+        # Phase 2: whale only (main, xyz) - incremental
+        # Phase 3: shark only + remaining exchanges - incremental
         logger.info("=" * 60)
-        logger.info("PROGRESSIVE STARTUP SCAN")
+        logger.info("PROGRESSIVE STARTUP SCAN (incremental)")
         logger.info("=" * 60)
 
         # Phase 1: High-priority (kraken + large_whale, main + xyz)
@@ -1176,28 +1201,28 @@ class MonitorService:
         if not self.running:
             return
 
-        # Phase 2: Normal (adds whale cohort)
-        logger.info("Phase 2/3: Normal scan (adding whale cohort)")
+        # Phase 2: Whale only (incremental - not re-scanning kraken/large_whale)
+        logger.info("Phase 2/3: Whale scan (incremental)")
         self.alerts.send_startup_phase_alert(
             phase=2,
             total_phases=3,
-            phase_name="Normal",
-            description="Adding whale cohort\nExchanges: main, xyz"
+            phase_name="Whale",
+            description="Adding whale cohort only\nExchanges: main, xyz"
         )
-        total, new_count = self.run_scan_phase(mode="normal", is_baseline=False, notify_cohorts=True, send_summary=True)
+        total, new_count = self.run_scan_phase(mode="whale-only", is_baseline=False, notify_cohorts=True, send_summary=True)
 
         if not self.running:
             return
 
-        # Phase 3: Comprehensive (adds shark + remaining exchanges)
-        logger.info("Phase 3/3: Comprehensive scan (full coverage)")
+        # Phase 3: Shark + remaining exchanges (incremental)
+        logger.info("Phase 3/3: Shark + additional exchanges (incremental)")
         self.alerts.send_startup_phase_alert(
             phase=3,
             total_phases=3,
-            phase_name="Comprehensive",
-            description="Adding shark cohort\nExchanges: all (main, xyz, flx, vntl, hyna, km)"
+            phase_name="Shark + Extra Exchanges",
+            description="Adding shark cohort\nAdding exchanges: flx, vntl, hyna, km"
         )
-        total, new_count = self.run_scan_phase(mode="comprehensive", is_baseline=False, notify_cohorts=True, send_summary=True)
+        total, new_count = self.run_scan_phase(mode="shark-incremental", is_baseline=False, notify_cohorts=True, send_summary=True)
 
         if not self.running:
             return

@@ -46,6 +46,8 @@ ALL_DEXES = [MAIN_DEX, "xyz", "flx", "vntl", "hyna", "km"]
 # high-priority: kraken + large_whale, main + xyz only
 # normal: kraken + large_whale + whale, main + xyz only
 # comprehensive: all cohorts, all exchanges
+# whale-only: whale cohort only (incremental for progressive scan)
+# shark-incremental: shark cohort + all exchanges for all cohorts already scanned
 SCAN_MODES = {
     "high-priority": {
         "cohorts": HIGH_PRIORITY_COHORTS,
@@ -58,6 +60,21 @@ SCAN_MODES = {
     "comprehensive": {
         "cohorts": ALL_COHORTS,
         "dexes": ALL_DEXES,
+    },
+    # Incremental modes for progressive startup scan (avoid re-scanning)
+    "whale-only": {
+        "cohorts": ["whale"],
+        "dexes": CORE_DEXES,
+    },
+    "shark-incremental": {
+        "cohorts": ["shark"],  # New cohort
+        "dexes": ALL_DEXES,    # All exchanges (shark needs full coverage)
+        # Note: Also need to scan existing cohorts on new exchanges
+        # This is handled by additional_scans below
+        "additional_scans": [
+            # Scan kraken/large_whale/whale on the extra exchanges they missed
+            {"cohorts": NORMAL_COHORTS, "dexes": ["flx", "vntl", "hyna", "km"]},
+        ],
     },
 }
 
