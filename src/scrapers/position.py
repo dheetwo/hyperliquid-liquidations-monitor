@@ -324,7 +324,8 @@ def parse_position(
 def fetch_all_positions(
     addresses: List[Tuple[str, str]],
     mark_prices: Dict[str, float],
-    dexes: List[str] = None
+    dexes: List[str] = None,
+    progress_callback: callable = None
 ) -> List[Position]:
     """
     Fetch positions for all addresses across specified exchanges with rate limiting.
@@ -333,6 +334,8 @@ def fetch_all_positions(
         addresses: List of (address, cohort) tuples
         mark_prices: Dict of token -> mark price
         dexes: List of dex identifiers to query (default: ALL_DEXES)
+        progress_callback: Optional callback(processed, total, positions_found, cohort)
+                          called every 50 addresses for progress updates
 
     Returns:
         List of all Position objects
@@ -348,10 +351,18 @@ def fetch_all_positions(
             current_cohort = cohort
             logger.info(f"Starting cohort: {cohort}")
 
-        # Progress logging
+        # Progress logging and callback
         if (i + 1) % 50 == 0:
             logger.info(f"Progress: {i + 1}/{total} addresses processed "
                        f"({len(all_positions)} positions, {sub_exchange_positions} from sub-exchanges)")
+
+            # Call progress callback if provided
+            if progress_callback:
+                try:
+                    progress_callback(i + 1, total, len(all_positions), current_cohort)
+                except Exception as e:
+                    logger.debug(f"Progress callback error: {e}")
+
             time.sleep(BATCH_DELAY)
 
         # Fetch positions from specified exchanges for this address

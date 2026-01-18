@@ -615,6 +615,50 @@ class TelegramAlerts:
         message = "\n".join(lines)
         return self._send_message(message, skip_rate_limit=True)
 
+    def send_scan_progress(
+        self,
+        processed: int,
+        total: int,
+        positions_found: int,
+        current_cohort: str,
+        phase_name: str = None
+    ) -> Optional[int]:
+        """
+        Send scan progress update during position fetching.
+
+        Args:
+            processed: Number of addresses processed
+            total: Total addresses to process
+            positions_found: Number of positions found so far
+            current_cohort: Current cohort being scanned
+            phase_name: Optional phase name for context
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        # Calculate progress percentage
+        pct = (processed / total) * 100 if total > 0 else 0
+
+        # Visual progress bar (20 chars wide)
+        bar_filled = int(pct / 5)  # 5% per block
+        bar_empty = 20 - bar_filled
+        progress_bar = "▓" * bar_filled + "░" * bar_empty
+
+        header = f"SCANNING: {phase_name}" if phase_name else "SCANNING POSITIONS"
+
+        lines = [
+            f"<b>{header}</b>",
+            "",
+            f"{progress_bar} {pct:.0f}%",
+            "",
+            f"Addresses: {processed}/{total}",
+            f"Positions: {positions_found}",
+            f"Cohort: {current_cohort}",
+        ]
+
+        message = "\n".join(lines)
+        return self._send_message(message, skip_rate_limit=True)
+
     def send_service_status(
         self,
         status: str,
