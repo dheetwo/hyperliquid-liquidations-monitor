@@ -962,16 +962,39 @@ class MonitorService:
         # Send startup notification
         self.alerts.send_service_status(
             "started",
-            f"Scheduled mode | Startup: {startup_mode}" +
-            (" (baseline)" if is_startup_baseline else "")
+            "Scheduled mode | Progressive startup scan"
         )
 
-        # Run immediate startup scan
-        logger.info(f"Startup scan: mode={startup_mode}, baseline={is_startup_baseline}")
-        total, new_count = self.run_scan_phase(mode=startup_mode, is_baseline=is_startup_baseline)
+        # Progressive startup scan: high-priority -> normal -> comprehensive
+        # This gives fast initial results, then progressively adds more coverage
+        logger.info("=" * 60)
+        logger.info("PROGRESSIVE STARTUP SCAN")
+        logger.info("=" * 60)
+
+        # Phase 1: High-priority (kraken + large_whale, main + xyz)
+        logger.info("Phase 1/3: High-priority scan (largest traders, main exchanges)")
+        total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True)
 
         if not self.running:
             return
+
+        # Phase 2: Normal (adds whale cohort)
+        logger.info("Phase 2/3: Normal scan (adding whale cohort)")
+        total, new_count = self.run_scan_phase(mode="normal", is_baseline=False)
+
+        if not self.running:
+            return
+
+        # Phase 3: Comprehensive (adds shark + remaining exchanges)
+        logger.info("Phase 3/3: Comprehensive scan (full coverage)")
+        total, new_count = self.run_scan_phase(mode="comprehensive", is_baseline=False)
+
+        if not self.running:
+            return
+
+        # Set final baseline from comprehensive scan
+        self.baseline_position_keys = set(self.watchlist.keys())
+        logger.info(f"Progressive scan complete. Final baseline: {len(self.baseline_position_keys)} positions")
 
         if total == 0:
             logger.warning("No positions from startup scan, waiting 60s before retry...")
