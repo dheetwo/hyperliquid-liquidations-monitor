@@ -780,6 +780,9 @@ class MonitorService:
         # Persist state to database
         self._save_state()
 
+        # Record scan completion time for rate limiting
+        self.db.set_last_scan_time(datetime.now(timezone.utc))
+
         logger.info("=" * 60)
         logger.info(f"SCAN PHASE COMPLETE - {len(self.watchlist)} positions in watchlist")
         logger.info("=" * 60)
@@ -1118,7 +1121,7 @@ class MonitorService:
         - Every hour (:00): Normal scan
         - Every 30 min (:30): Priority scan
 
-        On startup: immediate scan based on current time.
+        On startup: always runs progressive scan with rate limit protection.
         """
         now = datetime.now(timezone.utc)
         now_est = now.astimezone(EST)
@@ -1126,28 +1129,27 @@ class MonitorService:
         logger.info(f"Current time: {now_est.strftime('%H:%M EST')}")
         logger.info(f"Comprehensive scan at: {COMPREHENSIVE_SCAN_HOUR:02d}:{COMPREHENSIVE_SCAN_MINUTE:02d} EST")
 
-        # Try to restore state from database
-        state_restored = self._restore_state()
+        # Rate limit protection: check if last scan was too recent
+        SCAN_COOLDOWN_MINUTES = 5
+        last_scan = self.db.get_last_scan_time()
+        if last_scan:
+            elapsed = (now - last_scan).total_seconds()
+            cooldown_seconds = SCAN_COOLDOWN_MINUTES * 60
+            if elapsed < cooldown_seconds:
+                wait_seconds = int(cooldown_seconds - elapsed)
+                logger.info(
+                    f"Rate limit protection: last scan was {elapsed:.0f}s ago, "
+                    f"waiting {wait_seconds}s before starting"
+                )
+                self.alerts.send_service_status(
+                    "started",
+                    f"Rate limit cooldown: waiting {wait_seconds}s\n"
+                    f"Last scan: {last_scan.strftime('%H:%M:%S UTC')}"
+                )
+                time.sleep(wait_seconds)
 
-        if state_restored:
-            # State restored - skip progressive scan, go straight to monitoring
-            logger.info("State restored from database, resuming monitoring")
-
-            # Send startup notification with restored state info
-            db_stats = self.db.get_stats()
-            self.alerts.send_service_status(
-                "started",
-                f"Scheduled mode | Resumed from saved state\n"
-                f"Watchlist: {len(self.watchlist)} positions\n"
-                f"Baseline: {len(self.baseline_position_keys)} positions"
-            )
-
-            # Go directly to main loop
-            self._run_scheduled_main_loop()
-            return
-
-        # No saved state - do progressive startup scan
-        logger.info("No saved state, starting progressive scan")
+        # Always do progressive startup scan
+        logger.info("Starting progressive scan")
 
         # Send startup notification
         self.alerts.send_service_status(

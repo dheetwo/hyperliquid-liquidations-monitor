@@ -489,3 +489,29 @@ class MonitorDatabase:
             stats['file_size_mb'] = self.db_path.stat().st_size / (1024 * 1024)
 
         return stats
+
+    def get_last_scan_time(self) -> Optional[datetime]:
+        """
+        Get the timestamp of the last completed scan.
+
+        Returns:
+            datetime of last scan, or None if no scan recorded
+        """
+        value = self.get_state('last_scan_time')
+        if value:
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        return None
+
+    def set_last_scan_time(self, scan_time: Optional[datetime] = None):
+        """
+        Record the timestamp of a completed scan.
+
+        Args:
+            scan_time: Time of scan (defaults to now)
+        """
+        if scan_time is None:
+            scan_time = datetime.now(timezone.utc)
+        self.set_state('last_scan_time', scan_time.isoformat())
