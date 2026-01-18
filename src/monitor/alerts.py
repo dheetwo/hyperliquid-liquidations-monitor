@@ -221,6 +221,66 @@ class TelegramAlerts:
             return text[:self.config.max_message_length - 20] + "\n... (truncated)"
         return text
 
+    def send_scan_summary_alert(
+        self,
+        watchlist: dict,
+        scan_mode: str,
+        is_baseline: bool,
+        scan_time: datetime = None
+    ) -> Optional[int]:
+        """
+        Send summary of scan results showing top positions in watchlist.
+
+        Args:
+            watchlist: Dict of position_key -> WatchedPosition
+            scan_mode: Scan mode used ("comprehensive", "normal", "high-priority")
+            is_baseline: Whether this was a baseline scan
+            scan_time: Timestamp of the scan (default: now)
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        if scan_time is None:
+            scan_time = datetime.now(timezone.utc)
+
+        scan_time_et = scan_time.astimezone(EASTERN_TZ)
+
+        # Sort positions by distance (closest to liquidation first)
+        positions = sorted(watchlist.values(), key=lambda p: p.last_distance_pct)
+
+        # Build summary
+        lines = [
+            f"SCAN COMPLETE - {scan_mode.upper()}" + (" (BASELINE)" if is_baseline else ""),
+            "",
+            f"Watching {len(positions)} positions",
+            ""
+        ]
+
+        # Show top 10 closest to liquidation
+        if positions:
+            lines.append("Closest to liquidation:")
+            lines.append("")
+
+            display_positions = positions[:10]
+            for pos in display_positions:
+                side_str = "L" if pos.side == "Long" else "S"
+                margin_type = "Iso" if pos.is_isolated else "Cross"
+                if pos.position_value >= 1_000_000:
+                    value_str = f"${pos.position_value / 1_000_000:.1f}M"
+                else:
+                    value_str = f"${pos.position_value / 1_000:.0f}K"
+
+                lines.append(f"{pos.token} | {side_str} | {value_str} | {margin_type} | {pos.last_distance_pct:.2f}%")
+
+            if len(positions) > 10:
+                lines.append(f"... and {len(positions) - 10} more")
+
+        lines.append("")
+        lines.append(f"{scan_time_et.strftime('%H:%M:%S %Z')}")
+
+        message = "\n".join(lines)
+        return self._send_message(message)
+
     def send_new_positions_alert(
         self,
         positions: List["WatchedPosition"],

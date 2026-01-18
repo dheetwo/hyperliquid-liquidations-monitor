@@ -636,6 +636,14 @@ class MonitorService:
         logger.info(f"SCAN PHASE COMPLETE - {len(self.watchlist)} positions in watchlist")
         logger.info("=" * 60)
 
+        # Send scan summary alert
+        self.alerts.send_scan_summary_alert(
+            watchlist=self.watchlist,
+            scan_mode=scan_mode,
+            is_baseline=is_baseline,
+            scan_time=scan_start
+        )
+
         return len(self.watchlist), len(new_positions)
 
     def _refresh_critical_positions(self, mark_prices: Dict) -> int:
