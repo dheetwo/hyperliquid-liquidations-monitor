@@ -595,7 +595,8 @@ class MonitorService:
         self,
         mode: Optional[str] = None,
         is_baseline: bool = False,
-        notify_cohorts: bool = False
+        notify_cohorts: bool = False,
+        send_summary: bool = False
     ) -> Tuple[int, int]:
         """
         Execute the scan phase of the monitor loop.
@@ -617,6 +618,8 @@ class MonitorService:
                          - Alerts compare against previous baseline
             notify_cohorts: If True, send Telegram notification when each cohort starts.
                            Only used during startup progressive scan.
+            send_summary: If True, send scan summary alert showing watchlist.
+                         Only used during startup progressive scan.
 
         Returns:
             Tuple of (total_positions, new_positions_count)
@@ -777,13 +780,14 @@ class MonitorService:
         logger.info(f"SCAN PHASE COMPLETE - {len(self.watchlist)} positions in watchlist")
         logger.info("=" * 60)
 
-        # Send scan summary alert
-        self.alerts.send_scan_summary_alert(
-            watchlist=self.watchlist,
-            scan_mode=scan_mode,
-            is_baseline=is_baseline,
-            scan_time=scan_start
-        )
+        # Send scan summary alert (only during startup)
+        if send_summary:
+            self.alerts.send_scan_summary_alert(
+                watchlist=self.watchlist,
+                scan_mode=scan_mode,
+                is_baseline=is_baseline,
+                scan_time=scan_start
+            )
 
         return len(self.watchlist), len(new_positions)
 
@@ -1161,7 +1165,7 @@ class MonitorService:
             phase_name="High-priority",
             description="Scanning kraken + large_whale cohorts\nExchanges: main, xyz"
         )
-        total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True, notify_cohorts=True)
+        total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True, notify_cohorts=True, send_summary=True)
 
         if not self.running:
             return
@@ -1174,7 +1178,7 @@ class MonitorService:
             phase_name="Normal",
             description="Adding whale cohort\nExchanges: main, xyz"
         )
-        total, new_count = self.run_scan_phase(mode="normal", is_baseline=False, notify_cohorts=True)
+        total, new_count = self.run_scan_phase(mode="normal", is_baseline=False, notify_cohorts=True, send_summary=True)
 
         if not self.running:
             return
@@ -1187,7 +1191,7 @@ class MonitorService:
             phase_name="Comprehensive",
             description="Adding shark cohort\nExchanges: all (main, xyz, flx, vntl, hyna, km)"
         )
-        total, new_count = self.run_scan_phase(mode="comprehensive", is_baseline=False, notify_cohorts=True)
+        total, new_count = self.run_scan_phase(mode="comprehensive", is_baseline=False, notify_cohorts=True, send_summary=True)
 
         if not self.running:
             return
