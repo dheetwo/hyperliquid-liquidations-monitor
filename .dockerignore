@@ -1,0 +1,44 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Local data (will be mounted as volumes)
+logs/
+data/
+
+# Environment files (will be set via Coolify UI)
+.env
+.env.local
+
+# Archive/legacy code
+archive/
+
+# Documentation
+*.md
+!requirements.txt
+
+# Testing
+tests/
+.pytest_cache/
+.coverage
+
+# OS files
+.DS_Store
+Thumbs.db

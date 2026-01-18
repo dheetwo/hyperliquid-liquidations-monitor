@@ -1,0 +1,30 @@
+# Hyperdash Large Position Scanner - Requirements
+# ================================================
+# Versions pinned for security - update periodically after testing
+
+# HTTP client for Hyperliquid API
+requests>=2.32.5,<3.0.0
+
+# Browser automation for Hyperdash scraping
+playwright>=1.57.0,<2.0.0
+
+# Async HTTP (optional, for future async API calls)
+aiohttp>=3.13.3,<4.0.0
+
+# Data processing
+pandas>=2.3.3,<3.0.0
+
+# CLI enhancements
+rich>=14.2.0,<15.0.0
+
+# Type hints support (Python 3.9+)
+typing-extensions>=4.0.0,<5.0.0
+
+# Environment variable loading
+python-dotenv>=1.0.0,<2.0.0
+
+# Timezone handling for scheduled scans
+pytz>=2024.1
+
+# Security auditing (dev dependency)
+pip-audit>=2.7.0
