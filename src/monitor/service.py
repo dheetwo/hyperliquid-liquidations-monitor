@@ -59,6 +59,7 @@ from config.monitor_settings import (
     WATCHLIST_MIN_NOTIONAL_ISOLATED,
     WATCHLIST_MIN_NOTIONAL_CROSS,
     WATCHLIST_MIN_NOTIONAL_BY_TOKEN,
+    POSITION_CACHE_MAX_AGE_MINUTES,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     DEFAULT_SCAN_MODE,
@@ -434,6 +435,41 @@ class MonitorService:
         # Convert back to UTC
         return next_scan_est.astimezone(timezone.utc)
 
+    def _get_cached_position_file_age(self, filepath: str) -> Optional[float]:
+        """
+        Get the age of a cached position file in minutes.
+
+        Args:
+            filepath: Path to the position file
+
+        Returns:
+            Age in minutes, or None if file doesn't exist
+        """
+        try:
+            path = Path(filepath)
+            if not path.exists():
+                return None
+            mtime = path.stat().st_mtime
+            age_seconds = time.time() - mtime
+            return age_seconds / 60
+        except OSError:
+            return None
+
+    def _can_use_cached_positions(self, filepath: str) -> bool:
+        """
+        Check if cached position data is fresh enough to use as fallback.
+
+        Args:
+            filepath: Path to the position file
+
+        Returns:
+            True if cache is valid and fresh enough
+        """
+        age_minutes = self._get_cached_position_file_age(filepath)
+        if age_minutes is None:
+            return False
+        return age_minutes <= POSITION_CACHE_MAX_AGE_MINUTES
+
     def _load_filtered_positions(self, filepath: str) -> List[Dict]:
         """
         Load filtered position data from CSV.
@@ -740,7 +776,19 @@ class MonitorService:
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Position fetch network error: {type(e).__name__}")
-            return 0, 0
+            # Try to use cached data as fallback
+            position_file = "data/raw/position_data_monitor.csv"
+            if self._can_use_cached_positions(position_file):
+                age = self._get_cached_position_file_age(position_file)
+                logger.warning(f"Using cached position data ({age:.1f} min old) due to rate limit")
+                self.alerts.send_service_status(
+                    "error",
+                    f"Rate limited - using cached data ({age:.1f} min old)"
+                )
+                validated_position_path = _validate_file_path(position_file)
+            else:
+                logger.error("No valid cached position data available")
+                return 0, 0
         except (OSError, csv.Error) as e:
             logger.error(f"Position data save error: {type(e).__name__}: {e}")
             return 0, 0

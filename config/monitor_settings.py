@@ -129,6 +129,10 @@ WATCHLIST_MIN_NOTIONAL_BY_TOKEN = {
     "ETH": 75_000_000,    # $75M for ETH cross
 }
 
+# Maximum age (minutes) for cached position data to be used as fallback
+# If rate limited, will use cached data if it's newer than this
+POSITION_CACHE_MAX_AGE_MINUTES = 30
+
 # =============================================================================
 # TELEGRAM SETTINGS
 # =============================================================================
