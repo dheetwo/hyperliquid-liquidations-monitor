@@ -115,7 +115,7 @@ MAX_CRITICAL_POSITIONS = 30         # Max positions to track (prioritize closest
 MIN_HUNTING_SCORE = 0
 
 # Maximum distance (%) to include in watchlist - positions farther won't be monitored
-MAX_WATCH_DISTANCE_PCT = 15.0
+MAX_WATCH_DISTANCE_PCT = 5.0
 
 # =============================================================================
 # TELEGRAM SETTINGS
