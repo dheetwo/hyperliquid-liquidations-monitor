@@ -24,6 +24,7 @@ import pytz
 import requests
 
 from .alerts import TelegramAlerts, AlertConfig
+from .database import MonitorDatabase
 
 # Allowed base directories for file operations (security: prevent path traversal)
 PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
@@ -227,12 +228,17 @@ class MonitorService:
             dry_run=dry_run,
         ))
 
+        # Initialize database
+        self.db = MonitorDatabase()
+
         # State tracking
         self.watchlist: Dict[str, WatchedPosition] = {}  # position_key -> WatchedPosition
         self.previous_position_keys: Set[str] = set()  # Keys from previous scan
         self.baseline_position_keys: Set[str] = set()  # Keys from baseline (comprehensive) scan
         self.running = False
         self.last_scan_time: Optional[datetime] = None
+        self._last_snapshot_time: float = 0  # For throttling position snapshots
+        self._last_prune_time: float = 0  # For periodic data pruning
 
         # Signal handling for graceful shutdown
         signal.signal(signal.SIGINT, self._handle_shutdown)
@@ -242,6 +248,112 @@ class MonitorService:
         """Handle shutdown signals gracefully."""
         logger.info("Shutdown signal received, stopping monitor...")
         self.running = False
+        # Save state before shutdown
+        self._save_state()
+
+    def _restore_state(self) -> bool:
+        """
+        Restore watchlist and baseline from database.
+
+        Returns:
+            True if state was restored (had saved data), False otherwise
+        """
+        try:
+            # Load baseline
+            self.baseline_position_keys = self.db.load_baseline()
+
+            # Load watchlist
+            saved_positions = self.db.load_watchlist()
+            if not saved_positions:
+                logger.info("No saved watchlist found, starting fresh")
+                return False
+
+            # Reconstruct WatchedPosition objects
+            for pos_data in saved_positions:
+                watched = WatchedPosition(
+                    address=pos_data['address'],
+                    token=pos_data['token'],
+                    exchange=pos_data['exchange'],
+                    side=pos_data['side'],
+                    liq_price=pos_data['liq_price'],
+                    position_value=pos_data['position_value'],
+                    is_isolated=pos_data['is_isolated'],
+                    hunting_score=pos_data['hunting_score'],
+                    last_distance_pct=pos_data['last_distance_pct'],
+                    last_mark_price=pos_data['last_mark_price'],
+                    threshold_pct=pos_data['threshold_pct'],
+                    alerted_proximity=pos_data['alerted_proximity'],
+                    alerted_critical=pos_data['alerted_critical'],
+                    in_critical_zone=pos_data['in_critical_zone'],
+                    first_seen_scan=pos_data['first_seen_scan'],
+                    alert_message_id=pos_data['alert_message_id'],
+                    last_proximity_message_id=pos_data['last_proximity_message_id'],
+                )
+                self.watchlist[watched.position_key] = watched
+
+            self.previous_position_keys = set(self.watchlist.keys())
+
+            logger.info(
+                f"Restored state: {len(self.watchlist)} watchlist, "
+                f"{len(self.baseline_position_keys)} baseline"
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(f"Failed to restore state: {e}, starting fresh")
+            return False
+
+    def _save_state(self):
+        """Save watchlist and baseline to database."""
+        try:
+            self.db.save_watchlist(self.watchlist)
+            self.db.save_baseline(self.baseline_position_keys)
+            logger.debug("State saved to database")
+        except Exception as e:
+            logger.error(f"Failed to save state: {e}")
+
+    def _record_position_snapshots(self):
+        """Record position snapshots for history tracking (throttled)."""
+        now = time.time()
+
+        # Only snapshot every 5 minutes to avoid excessive writes
+        if now - self._last_snapshot_time < 300:
+            return
+
+        try:
+            snapshots = [
+                {
+                    'position_key': pos.position_key,
+                    'liq_price': pos.liq_price,
+                    'position_value': pos.position_value,
+                    'distance_pct': pos.last_distance_pct,
+                    'mark_price': pos.last_mark_price,
+                }
+                for pos in self.watchlist.values()
+                if pos.last_distance_pct is not None and pos.last_mark_price is not None
+            ]
+
+            if snapshots:
+                self.db.record_position_snapshots_batch(snapshots)
+
+            self._last_snapshot_time = now
+
+        except Exception as e:
+            logger.warning(f"Failed to record position snapshots: {e}")
+
+    def _maybe_prune_data(self):
+        """Periodically prune old data (once per day)."""
+        now = time.time()
+
+        # Prune once per day (86400 seconds)
+        if now - self._last_prune_time < 86400:
+            return
+
+        try:
+            self.db.prune_old_data()
+            self._last_prune_time = now
+        except Exception as e:
+            logger.warning(f"Failed to prune old data: {e}")
 
     def _get_scan_mode_for_time(self, dt: datetime) -> str:
         """
@@ -606,6 +718,13 @@ class MonitorService:
             if message_id:
                 for pos in new_positions:
                     pos.alert_message_id = message_id
+                    # Log alert to database
+                    self.db.log_alert(
+                        position_key=pos.position_key,
+                        alert_type="new_position",
+                        message_id=message_id,
+                        details=f"{pos.token} {pos.side} ${pos.position_value:,.0f}"
+                    )
         else:
             logger.info("Step 5: No new positions to alert")
 
@@ -631,6 +750,9 @@ class MonitorService:
 
         self.previous_position_keys = set(new_watchlist.keys())
         self.last_scan_time = scan_start
+
+        # Persist state to database
+        self._save_state()
 
         logger.info("=" * 60)
         logger.info(f"SCAN PHASE COMPLETE - {len(self.watchlist)} positions in watchlist")
@@ -839,6 +961,13 @@ class MonitorService:
                             position.alerted_critical = False
                             position.in_critical_zone = False
                             alerts_sent += 1
+                            # Log to database
+                            self.db.log_alert(
+                                position_key=position.position_key,
+                                alert_type="recovery",
+                                message_id=msg_id,
+                                details=f"{previous_distance:.3f}% -> {new_distance:.2f}%"
+                            )
                         continue  # Skip other checks for this position
 
                     # Check for CRITICAL alert (crossing below 0.1%)
@@ -861,6 +990,13 @@ class MonitorService:
                             position.alerted_critical = True
                             position.last_proximity_message_id = msg_id
                             alerts_sent += 1
+                            # Log to database
+                            self.db.log_alert(
+                                position_key=position.position_key,
+                                alert_type="critical",
+                                message_id=msg_id,
+                                details=f"distance={new_distance:.3f}%"
+                            )
 
                     # Check for PROXIMITY alert (crossing below 0.5%)
                     elif (
@@ -881,9 +1017,22 @@ class MonitorService:
                             position.alerted_proximity = True
                             position.last_proximity_message_id = msg_id
                             alerts_sent += 1
+                            # Log to database
+                            self.db.log_alert(
+                                position_key=position.position_key,
+                                alert_type="proximity",
+                                message_id=msg_id,
+                                details=f"distance={new_distance:.2f}%"
+                            )
 
                 if alerts_sent > 0:
                     logger.info(f"Sent {alerts_sent} alerts")
+
+                # Record position snapshots periodically (every 5 min)
+                self._record_position_snapshots()
+
+                # Prune old data periodically (once per day)
+                self._maybe_prune_data()
 
                 # Log periodic status
                 remaining = int(next_scan_time - time.time())
@@ -950,14 +1099,28 @@ class MonitorService:
         logger.info(f"Current time: {now_est.strftime('%H:%M EST')}")
         logger.info(f"Comprehensive scan at: {COMPREHENSIVE_SCAN_HOUR:02d}:{COMPREHENSIVE_SCAN_MINUTE:02d} EST")
 
-        # Determine startup scan mode based on current time
-        startup_mode = self._get_scan_mode_for_time(now)
-        is_startup_baseline = (startup_mode == "comprehensive")
+        # Try to restore state from database
+        state_restored = self._restore_state()
 
-        # If no baseline exists yet, treat first scan as baseline
-        if not self.baseline_position_keys:
-            is_startup_baseline = True
-            logger.info("No baseline exists, first scan will establish baseline")
+        if state_restored:
+            # State restored - skip progressive scan, go straight to monitoring
+            logger.info("State restored from database, resuming monitoring")
+
+            # Send startup notification with restored state info
+            db_stats = self.db.get_stats()
+            self.alerts.send_service_status(
+                "started",
+                f"Scheduled mode | Resumed from saved state\n"
+                f"Watchlist: {len(self.watchlist)} positions\n"
+                f"Baseline: {len(self.baseline_position_keys)} positions"
+            )
+
+            # Go directly to main loop
+            self._run_scheduled_main_loop()
+            return
+
+        # No saved state - do progressive startup scan
+        logger.info("No saved state, starting progressive scan")
 
         # Send startup notification
         self.alerts.send_service_status(
@@ -1018,7 +1181,15 @@ class MonitorService:
             logger.warning("No positions from startup scan, waiting 60s before retry...")
             time.sleep(60)
 
-        # Main scheduled loop
+        # Enter main scheduled loop
+        self._run_scheduled_main_loop()
+
+    def _run_scheduled_main_loop(self):
+        """
+        Main scheduled loop - runs after startup (fresh or restored).
+
+        Alternates between monitor phase and scheduled scans.
+        """
         while self.running:
             # Get next scan time and mode
             next_scan_time = self._get_next_scan_time()
