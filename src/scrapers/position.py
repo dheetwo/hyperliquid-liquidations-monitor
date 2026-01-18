@@ -346,23 +346,22 @@ def fetch_all_positions(
     sub_exchange_positions = 0
 
     for i, (address, cohort) in enumerate(addresses):
-        # Log cohort transitions
+        # Log cohort transitions and notify via callback
         if cohort != current_cohort:
             current_cohort = cohort
             logger.info(f"Starting cohort: {cohort}")
 
-        # Progress logging and callback
-        if (i + 1) % 50 == 0:
-            logger.info(f"Progress: {i + 1}/{total} addresses processed "
-                       f"({len(all_positions)} positions, {sub_exchange_positions} from sub-exchanges)")
-
-            # Call progress callback if provided
+            # Call callback on cohort transition
             if progress_callback:
                 try:
-                    progress_callback(i + 1, total, len(all_positions), current_cohort)
+                    progress_callback(i, total, len(all_positions), current_cohort)
                 except Exception as e:
                     logger.debug(f"Progress callback error: {e}")
 
+        # Progress logging every 50 addresses
+        if (i + 1) % 50 == 0:
+            logger.info(f"Progress: {i + 1}/{total} addresses processed "
+                       f"({len(all_positions)} positions, {sub_exchange_positions} from sub-exchanges)")
             time.sleep(BATCH_DELAY)
 
         # Fetch positions from specified exchanges for this address

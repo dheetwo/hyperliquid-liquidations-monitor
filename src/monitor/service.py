@@ -662,24 +662,18 @@ class MonitorService:
                 logger.error("Failed to fetch mark prices")
                 return 0, 0
 
-            # Create progress callback for Telegram updates (at 25%, 50%, 75% milestones)
-            last_milestone = [0]  # Use list for mutable closure
+            # Create callback for cohort transition notifications
+            last_cohort = [None]  # Use list for mutable closure
 
             def progress_callback(processed, total, positions_found, cohort):
-                pct = (processed / total) * 100 if total > 0 else 0
-                # Only send at 25% milestones
-                milestone = int(pct // 25) * 25
-                if milestone > last_milestone[0] and milestone < 100:
-                    last_milestone[0] = milestone
-                    self.alerts.send_scan_progress(
-                        processed=processed,
-                        total=total,
-                        positions_found=positions_found,
-                        current_cohort=cohort,
+                if cohort != last_cohort[0]:
+                    last_cohort[0] = cohort
+                    self.alerts.send_cohort_start(
+                        cohort=cohort,
                         phase_name=scan_mode.replace("-", " ").title()
                     )
 
-            # Fetch positions with progress updates
+            # Fetch positions with cohort notifications
             positions = fetch_all_positions(
                 addresses, mark_prices, dexes,
                 progress_callback=progress_callback
