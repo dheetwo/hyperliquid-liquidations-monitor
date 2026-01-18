@@ -53,9 +53,23 @@ from config.monitor_settings import (
 )
 
 
+def ensure_directories():
+    """Ensure required data directories exist."""
+    dirs = [
+        project_root / "data" / "raw",
+        project_root / "data" / "processed",
+        project_root / "logs",
+    ]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+
 def setup_logging(log_level: str = LOG_LEVEL, log_file: str = LOG_FILE):
     """Configure logging for the monitor service."""
     from datetime import datetime
+
+    # Ensure all directories exist
+    ensure_directories()
 
     # Create logs directory if needed
     log_path = Path(log_file)
