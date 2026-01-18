@@ -117,6 +117,18 @@ MIN_HUNTING_SCORE = 0
 # Maximum distance (%) to include in watchlist - positions farther won't be monitored
 MAX_WATCH_DISTANCE_PCT = 5.0
 
+# Minimum notional value thresholds for watchlist inclusion
+# Isolated positions: lower threshold (higher liquidation impact)
+# Cross positions: higher threshold (more buffer before liquidation)
+WATCHLIST_MIN_NOTIONAL_ISOLATED = 100_000    # $100K for isolated
+WATCHLIST_MIN_NOTIONAL_CROSS = 500_000       # $500K for cross (default)
+
+# Token-specific minimums for cross positions (majors need higher thresholds)
+WATCHLIST_MIN_NOTIONAL_BY_TOKEN = {
+    "BTC": 100_000_000,   # $100M for BTC cross
+    "ETH": 75_000_000,    # $75M for ETH cross
+}
+
 # =============================================================================
 # TELEGRAM SETTINGS
 # =============================================================================

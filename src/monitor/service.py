@@ -56,6 +56,9 @@ from config.monitor_settings import (
     POLL_INTERVAL_SECONDS,
     MAX_WATCH_DISTANCE_PCT,
     MIN_HUNTING_SCORE,
+    WATCHLIST_MIN_NOTIONAL_ISOLATED,
+    WATCHLIST_MIN_NOTIONAL_CROSS,
+    WATCHLIST_MIN_NOTIONAL_BY_TOKEN,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     DEFAULT_SCAN_MODE,
@@ -478,6 +481,7 @@ class MonitorService:
         Filters by:
         - Distance within MAX_WATCH_DISTANCE_PCT
         - Hunting score above MIN_HUNTING_SCORE
+        - Notional value thresholds (varies by token and margin type)
 
         Args:
             filtered_positions: List of position dicts from filtered CSV
@@ -487,6 +491,7 @@ class MonitorService:
         """
         watchlist = {}
         scan_time = datetime.now(timezone.utc).isoformat()
+        filtered_by_notional = 0
 
         for row in filtered_positions:
             try:
@@ -502,10 +507,23 @@ class MonitorService:
                 distance_pct = float(row['Distance to Liq (%)'])
                 current_price = float(row['Current Price'])
 
-                # Apply filters
+                # Apply distance filter
                 if distance_pct > MAX_WATCH_DISTANCE_PCT:
                     continue
                 if hunting_score < MIN_HUNTING_SCORE:
+                    continue
+
+                # Apply notional filters
+                if is_isolated:
+                    min_notional = WATCHLIST_MIN_NOTIONAL_ISOLATED
+                else:
+                    # Check token-specific threshold first, then default
+                    min_notional = WATCHLIST_MIN_NOTIONAL_BY_TOKEN.get(
+                        token, WATCHLIST_MIN_NOTIONAL_CROSS
+                    )
+
+                if position_value < min_notional:
+                    filtered_by_notional += 1
                     continue
 
                 # Create watched position
@@ -530,7 +548,7 @@ class MonitorService:
                 logger.debug(f"Skipping position due to parsing error: {e}")
                 continue
 
-        logger.info(f"Built watchlist with {len(watchlist)} positions")
+        logger.info(f"Built watchlist with {len(watchlist)} positions ({filtered_by_notional} filtered by notional)")
         return watchlist
 
     def _detect_new_positions(

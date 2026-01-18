@@ -230,6 +230,7 @@ class TelegramAlerts:
     ) -> Optional[int]:
         """
         Send summary of scan results showing top positions in watchlist.
+        Uses same format as send_new_positions_alert for consistency.
 
         Args:
             watchlist: Dict of position_key -> WatchedPosition
@@ -248,7 +249,7 @@ class TelegramAlerts:
         # Sort positions by distance (closest to liquidation first)
         positions = sorted(watchlist.values(), key=lambda p: p.last_distance_pct)
 
-        # Build summary
+        # Build header
         lines = [
             f"SCAN COMPLETE - {scan_mode.upper()}" + (" (BASELINE)" if is_baseline else ""),
             "",
@@ -256,29 +257,62 @@ class TelegramAlerts:
             ""
         ]
 
-        # Show top 10 closest to liquidation
-        if positions:
-            lines.append("Closest to liquidation:")
+        if not positions:
+            lines.append("No positions in watchlist")
+            lines.append("")
+            lines.append(f"{scan_time_et.strftime('%H:%M:%S %Z')}")
+            return self._send_message("\n".join(lines))
+
+        # Show positions in same format as NEW LIQUIDATION TARGETS
+        # Limit to 15 positions to fit in message
+        display_positions = positions[:15]
+
+        # Pre-compute formatted values to find max widths
+        formatted = []
+        for pos in display_positions:
+            side_str = "L" if pos.side == "Long" else "S"
+            margin_type = "Iso" if pos.is_isolated else "Cross"
+            if pos.position_value >= 1_000_000:
+                value_str = f"${pos.position_value / 1_000_000:.1f}M"
+            else:
+                value_str = f"${pos.position_value / 1_000:.0f}K"
+            dist_str = f"{pos.last_distance_pct:.2f}%"
+            formatted.append((pos, pos.token, side_str, value_str, margin_type, dist_str))
+
+        # Find max width for each column
+        max_token = max(len(f[1]) for f in formatted)
+        max_side = max(len(f[2]) for f in formatted)
+        max_value = max(len(f[3]) for f in formatted)
+        max_margin = max(len(f[4]) for f in formatted)
+        max_dist = max(len(f[5]) for f in formatted)
+
+        for pos, token, side_str, value_str, margin_type, dist_str in formatted:
+            hypurrscan_url = f"https://hypurrscan.io/address/{pos.address}"
+
+            # Truncate address with equal chars on each side and ellipsis in middle
+            addr = pos.address
+            addr_display = f"{addr[:18]}...{addr[-18:]}"
+
+            row = (
+                f"{token:<{max_token}} | "
+                f"{side_str:<{max_side}} | "
+                f"{value_str:>{max_value}} | "
+                f"{margin_type:<{max_margin}} | "
+                f"{dist_str:<{max_dist}}"
+            )
+            lines.append(f"<code>{row}</code>")
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a>")
             lines.append("")
 
-            display_positions = positions[:10]
-            for pos in display_positions:
-                side_str = "L" if pos.side == "Long" else "S"
-                margin_type = "Iso" if pos.is_isolated else "Cross"
-                if pos.position_value >= 1_000_000:
-                    value_str = f"${pos.position_value / 1_000_000:.1f}M"
-                else:
-                    value_str = f"${pos.position_value / 1_000:.0f}K"
+        if len(positions) > 15:
+            lines.append(f"... and {len(positions) - 15} more positions")
+            lines.append("")
 
-                lines.append(f"{pos.token} | {side_str} | {value_str} | {margin_type} | {pos.last_distance_pct:.2f}%")
-
-            if len(positions) > 10:
-                lines.append(f"... and {len(positions) - 10} more")
-
-        lines.append("")
         lines.append(f"{scan_time_et.strftime('%H:%M:%S %Z')}")
 
         message = "\n".join(lines)
+        message = self._truncate_message(message)
+
         return self._send_message(message)
 
     def send_new_positions_alert(
