@@ -973,6 +973,12 @@ class MonitorService:
 
         # Phase 1: High-priority (kraken + large_whale, main + xyz)
         logger.info("Phase 1/3: High-priority scan (largest traders, main exchanges)")
+        self.alerts.send_startup_phase_alert(
+            phase=1,
+            total_phases=3,
+            phase_name="High-priority",
+            description="Scanning kraken + large_whale cohorts\nExchanges: main, xyz"
+        )
         total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True)
 
         if not self.running:
@@ -980,6 +986,12 @@ class MonitorService:
 
         # Phase 2: Normal (adds whale cohort)
         logger.info("Phase 2/3: Normal scan (adding whale cohort)")
+        self.alerts.send_startup_phase_alert(
+            phase=2,
+            total_phases=3,
+            phase_name="Normal",
+            description="Adding whale cohort\nExchanges: main, xyz"
+        )
         total, new_count = self.run_scan_phase(mode="normal", is_baseline=False)
 
         if not self.running:
@@ -987,6 +999,12 @@ class MonitorService:
 
         # Phase 3: Comprehensive (adds shark + remaining exchanges)
         logger.info("Phase 3/3: Comprehensive scan (full coverage)")
+        self.alerts.send_startup_phase_alert(
+            phase=3,
+            total_phases=3,
+            phase_name="Comprehensive",
+            description="Adding shark cohort\nExchanges: all (main, xyz, flx, vntl, hyna, km)"
+        )
         total, new_count = self.run_scan_phase(mode="comprehensive", is_baseline=False)
 
         if not self.running:

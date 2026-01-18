@@ -571,6 +571,50 @@ class TelegramAlerts:
         reply_to = reply_to_message_id or position.alert_message_id
         return self._send_message(message, reply_to_message_id=reply_to)
 
+    def send_startup_phase_alert(
+        self,
+        phase: int,
+        total_phases: int,
+        phase_name: str,
+        description: str,
+        timestamp: datetime = None
+    ) -> Optional[int]:
+        """
+        Send startup phase progress notification.
+
+        Args:
+            phase: Current phase number (1-indexed)
+            total_phases: Total number of phases
+            phase_name: Short name of the phase (e.g., "High-priority")
+            description: What this phase covers
+            timestamp: Timestamp (default: now)
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc)
+
+        timestamp_et = timestamp.astimezone(EASTERN_TZ)
+
+        # Progress bar visualization
+        filled = "█" * phase
+        empty = "░" * (total_phases - phase)
+        progress_bar = f"[{filled}{empty}]"
+
+        lines = [
+            f"<b>STARTUP SCAN {phase}/{total_phases}</b>",
+            "",
+            f"{progress_bar} {phase_name}",
+            "",
+            description,
+            "",
+            f"{timestamp_et.strftime('%H:%M:%S %Z')}",
+        ]
+
+        message = "\n".join(lines)
+        return self._send_message(message, skip_rate_limit=True)
+
     def send_service_status(
         self,
         status: str,
