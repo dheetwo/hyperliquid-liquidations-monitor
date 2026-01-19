@@ -20,7 +20,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.scrapers.position import run_scan_mode, SCAN_MODES
+from src.pipeline.step2_position import run_scan_mode, SCAN_MODES
 
 
 def main():

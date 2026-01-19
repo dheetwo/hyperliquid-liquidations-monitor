@@ -17,50 +17,70 @@ The ultimate question: *How much would liquidating this position move the price?
 
 ```
 hyperdash_scanner/
-├── src/                        # Source code
-│   ├── scrapers/
-│   │   ├── cohort.py           # Step 1: Fetch wallet addresses
-│   │   └── position.py         # Step 2: Fetch positions
-│   ├── filters/
-│   │   └── liquidation.py      # Step 3: Filter and score
-│   ├── monitor/
-│   │   ├── service.py          # Continuous monitoring service
-│   │   └── alerts.py           # Telegram alert system
-│   └── api/
-│       └── hyperliquid.py      # API client with rate limiting
+├── src/                         # Source code
+│   ├── pipeline/                # Data pipeline (Steps 1-3)
+│   │   ├── __init__.py          # Package exports
+│   │   ├── step1_cohort.py      # Step 1: Fetch wallet addresses
+│   │   ├── step2_position.py    # Step 2: Fetch positions
+│   │   └── step3_filter.py      # Step 3: Filter and score
+│   ├── monitor/                 # Monitor service
+│   │   ├── __init__.py          # Package exports
+│   │   ├── orchestrator.py      # Main MonitorService, scheduling
+│   │   ├── scan_phase.py        # Scan phase logic
+│   │   ├── monitor_phase.py     # Monitor phase logic
+│   │   ├── watchlist.py         # Watchlist management
+│   │   ├── alerts.py            # Telegram alert system
+│   │   └── database.py          # SQLite persistence
+│   ├── api/                     # External API clients
+│   │   ├── __init__.py          # Package exports
+│   │   ├── hyperliquid.py       # HyperliquidAPIClient, RateLimiter
+│   │   └── orderbook.py         # L2Book, cascade detection
+│   ├── utils/                   # Shared utilities
+│   │   ├── __init__.py          # Package exports
+│   │   ├── paths.py             # Path validation, directories
+│   │   ├── csv_helpers.py       # CSV sanitization
+│   │   └── prices.py            # Mark price fetching
+│   ├── models/                  # Shared data models
+│   │   ├── __init__.py          # Package exports
+│   │   ├── position.py          # Position, WatchedPosition
+│   │   └── trader.py            # CohortTrader
+│   ├── scrapers/                # DEPRECATED: Use pipeline/
+│   └── filters/                 # DEPRECATED: Use pipeline/
 ├── config/
-│   ├── settings.py             # Thresholds and configuration
-│   └── monitor_settings.py     # Monitor service configuration
+│   ├── settings.py              # Thresholds and configuration
+│   └── monitor_settings.py      # Monitor service configuration
 ├── data/
-│   ├── raw/                    # Direct API outputs
+│   ├── raw/                     # Direct API outputs
 │   │   ├── cohort_data*.csv
 │   │   └── position_data*.csv
-│   └── processed/              # Filtered/scored outputs
+│   └── processed/               # Filtered/scored outputs
 │       └── filtered_*.csv
-├── scripts/                    # CLI entry points
+├── scripts/                     # CLI entry points
 │   ├── scan_cohorts.py
 │   ├── scan_positions.py
 │   ├── filter_positions.py
-│   └── run_monitor.py          # Continuous monitor service
-├── archive/                    # Legacy v1 code
+│   └── run_monitor.py           # Continuous monitor service
+├── docs/
+│   └── pipeline-flowchart.md    # Visual data pipeline flow
+├── archive/                     # Legacy v1 code
 └── logs/
 ```
 
 ## Data Pipeline
 
-**Step 1: Cohort Scraper** (`src/scrapers/cohort.py`)
+**Step 1: Cohort Scraper** (`src/pipeline/step1_cohort.py`)
 - Source: `https://api.hyperdash.com/graphql` (GetSizeCohort query)
 - Fetches wallet addresses grouped by account size
 - Priority order: kraken → large_whale → whale → shark
 - Output: `data/raw/cohort_data*.csv`
 
-**Step 2: Position Scraper** (`src/scrapers/position.py`)
+**Step 2: Position Scraper** (`src/pipeline/step2_position.py`)
 - Source: `https://api.hyperliquid.xyz/info` (clearinghouseState)
 - Scans 6 exchanges per wallet: main + 5 sub-exchanges (xyz, flx, vntl, hyna, km)
 - Captures all positions with full details
 - Output: `data/raw/position_data*.csv`
 
-**Step 3: Liquidation Filter** (`src/filters/liquidation.py`)
+**Step 3: Liquidation Filter** (`src/pipeline/step3_filter.py`)
 - Filters out positions without liquidation price
 - Fetches current mark prices from all exchanges
 - Fetches L2 order books for all unique tokens
@@ -129,7 +149,7 @@ All columns from position_data.csv plus:
 - Isolated positions: 434 (12%)
 - With liquidation price: 2,672 (72%)
 
-## Liquidation Filter (`src/filters/liquidation.py`)
+## Liquidation Filter (`src/pipeline/step3_filter.py`)
 
 ### Calculated Columns
 
@@ -515,22 +535,40 @@ def estimate_price_impact(order_book, liquidation_size, side):
 
 ## File Locations
 
-**Source Code:**
-- `src/scrapers/cohort.py` - Step 1: Fetch wallet addresses
-- `src/scrapers/position.py` - Step 2: Fetch positions
-- `src/filters/liquidation.py` - Step 3: Filter and score
-- `src/monitor/service.py` - Continuous monitoring service
+**Pipeline (Data Processing):**
+- `src/pipeline/step1_cohort.py` - Step 1: Fetch wallet addresses
+- `src/pipeline/step2_position.py` - Step 2: Fetch positions
+- `src/pipeline/step3_filter.py` - Step 3: Filter and score
+
+**Monitor Service:**
+- `src/monitor/orchestrator.py` - Main MonitorService class with scheduling
+- `src/monitor/scan_phase.py` - Scan phase logic
+- `src/monitor/monitor_phase.py` - Monitor phase logic (price polling)
+- `src/monitor/watchlist.py` - Watchlist building and management
 - `src/monitor/alerts.py` - Telegram alert system
-- `src/api/hyperliquid.py` - API client with rate limiting
+- `src/monitor/database.py` - SQLite persistence
+
+**API Clients:**
+- `src/api/hyperliquid.py` - HyperliquidAPIClient, RateLimiter
+- `src/api/orderbook.py` - L2Book, cascade detection
+
+**Shared Utilities:**
+- `src/utils/paths.py` - Path validation, project directories
+- `src/utils/csv_helpers.py` - CSV sanitization
+- `src/utils/prices.py` - Mark price fetching
+
+**Shared Models:**
+- `src/models/position.py` - Position, WatchedPosition dataclasses
+- `src/models/trader.py` - CohortTrader dataclass
 
 **Configuration:**
 - `config/settings.py` - Thresholds and constants
 - `config/monitor_settings.py` - Monitor service configuration
 
 **CLI Entry Points:**
-- `scripts/scan_cohorts.py`
-- `scripts/scan_positions.py`
-- `scripts/filter_positions.py`
+- `scripts/scan_cohorts.py` - Run Step 1
+- `scripts/scan_positions.py` - Run Step 2
+- `scripts/filter_positions.py` - Run Step 3
 - `scripts/run_monitor.py` - Continuous monitor service
 
 **Data - Raw (API outputs):**
@@ -544,6 +582,11 @@ def estimate_price_impact(order_book, liquidation_size, side):
 **Data - Processed (filtered/scored):**
 - `data/processed/filtered_position_data_priority.csv`
 - `data/processed/filtered_position_data.csv`
+
+**Deprecated (backward compatible shims):**
+- `src/scrapers/` - Re-exports from `src/pipeline/`
+- `src/filters/` - Re-exports from `src/pipeline/`
+- `src/monitor/service.py` - Re-exports from `src/monitor/orchestrator.py`
 
 **Legacy (archived):**
 - `archive/` - Old v1 architecture (filter.py, scraper.py, scanner.py, models.py, output.py)

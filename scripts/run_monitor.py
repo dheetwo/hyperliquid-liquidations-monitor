@@ -40,7 +40,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.monitor.service import MonitorService
+from src.monitor import MonitorService
 from src.monitor.alerts import send_test_alert
 from config.monitor_settings import (
     SCAN_INTERVAL_MINUTES,
