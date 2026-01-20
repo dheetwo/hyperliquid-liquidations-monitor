@@ -54,7 +54,9 @@ COMPREHENSIVE_SCAN_MINUTE = 30  # Minute of comprehensive scan
 # Majors: Most liquid assets
 MAJORS = ["ETH", "SOL", "BNB", "XRP"]
 
-# Isolated position multiplier (isolated positions count as 5x their notional)
+# Isolated position multiplier for threshold checks
+# Used internally to lower thresholds for isolated positions (higher liquidation impact)
+# Display values always show raw notional, not multiplied
 ISOLATED_MULTIPLIER = 5.0
 
 # =============================================================================
@@ -110,9 +112,6 @@ MAX_CRITICAL_POSITIONS = 30         # Max positions to track (prioritize closest
 # =============================================================================
 # WATCHLIST SETTINGS
 # =============================================================================
-
-# Minimum hunting score to include in watchlist (filters out low-priority positions)
-MIN_HUNTING_SCORE = 0
 
 # Maximum distance (%) to include in watchlist - positions farther won't be monitored
 MAX_WATCH_DISTANCE_PCT = 5.0
@@ -192,7 +191,9 @@ def passes_new_position_threshold(
     """
     Check if a position passes the threshold for NEW POSITION alerts.
 
-    Isolated positions get a 5x multiplier to their notional for threshold checks.
+    Isolated positions get ISOLATED_MULTIPLIER applied internally for threshold
+    comparison (effectively lowering the bar), but displayed values always show
+    raw notional.
 
     Args:
         token: Token symbol (e.g., "BTC", "ETH", "DOGE")
@@ -203,7 +204,7 @@ def passes_new_position_threshold(
     Returns:
         True if position should trigger a new position alert
     """
-    # Apply isolated multiplier
+    # Apply isolated multiplier internally for threshold comparison
     effective_value = position_value * ISOLATED_MULTIPLIER if is_isolated else position_value
 
     # Determine which tier thresholds to check based on distance

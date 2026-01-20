@@ -15,6 +15,7 @@ The scan phase runs the full data pipeline:
 
 import csv
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple, TYPE_CHECKING
 
@@ -22,6 +23,7 @@ import requests
 
 from src.models import WatchedPosition
 from src.utils.paths import validate_file_path
+from src.utils.debug_logger import ScanDebugLog
 from src.pipeline import (
     fetch_cohorts,
     save_cohort_csv,
@@ -32,6 +34,7 @@ from src.pipeline import (
     save_position_csv,
     filter_positions,
     SCAN_MODES,
+    clear_position_scan_progress,
 )
 from config.monitor_settings import COHORT_DATA_PATH
 from .watchlist import load_filtered_positions, build_watchlist, detect_new_positions
@@ -86,17 +89,37 @@ def run_scan_phase(
 
     scan_start = datetime.now(timezone.utc)
 
+    # Initialize debug log for this scan
+    debug_log = ScanDebugLog(
+        scan_mode=scan_mode,
+        is_baseline=is_baseline,
+        timestamp=scan_start
+    )
+
     # Step 1: Fetch cohort data
     logger.info("Step 1: Fetching cohort data...")
+    phase1_start = time.time()
     try:
         traders = fetch_cohorts(PRIORITY_COHORTS, delay=1.0)
         save_cohort_csv(traders, COHORT_DATA_PATH)
+        phase1_elapsed = time.time() - phase1_start
         logger.info(f"Saved {len(traders)} traders to {COHORT_DATA_PATH}")
+
+        # Log cohort phase details
+        debug_log.log_cohort_phase(
+            traders=traders,
+            cohorts_requested=PRIORITY_COHORTS,
+            elapsed_seconds=phase1_elapsed
+        )
     except requests.exceptions.RequestException as e:
         logger.error(f"Cohort fetch network error: {type(e).__name__}")
+        debug_log.log_error("cohort", f"Network error: {type(e).__name__}")
+        debug_log.save()
         return 0, 0
     except (OSError, csv.Error) as e:
         logger.error(f"Cohort data save error: {type(e).__name__}: {e}")
+        debug_log.log_error("cohort", f"Save error: {type(e).__name__}: {e}")
+        debug_log.save()
         return 0, 0
 
     # Step 2: Fetch position data
@@ -108,6 +131,12 @@ def run_scan_phase(
         cohorts = mode_config["cohorts"]
         dexes = mode_config["dexes"]
         additional_scans = mode_config.get("additional_scans", [])
+
+        # For baseline scans, clear any previous progress to ensure fresh scan
+        # For non-baseline scans, allow resume if interrupted
+        if is_baseline:
+            clear_position_scan_progress()
+            logger.info("Baseline scan: cleared previous progress for fresh scan")
 
         # Fetch mark prices (async for speed)
         logger.info("Fetching mark prices from all exchanges...")
@@ -132,15 +161,52 @@ def run_scan_phase(
         all_positions = []
 
         # Main scan: primary cohorts and dexes
+        # Resume is enabled for non-baseline scans to recover from interruptions
+        allow_resume = not is_baseline
         addresses = load_cohort_addresses(COHORT_DATA_PATH, cohorts=cohorts)
         if addresses:
+            # Send phase start alert during deployment (when notify_cohorts is True)
+            if notify_cohorts:
+                # Calculate estimated time: ~30 concurrent requests, ~0.5s each
+                total_requests = len(addresses) * len(dexes)
+                estimated_seconds = (total_requests / 30) * 0.5
+
+                # Build cohort breakdown
+                cohort_breakdown = {}
+                for addr, cohort in addresses:
+                    cohort_breakdown[cohort] = cohort_breakdown.get(cohort, 0) + 1
+
+                service.alerts.send_phase_start_alert(
+                    phase_name="Phase 2: Position Scan",
+                    address_count=len(addresses),
+                    exchange_count=len(dexes),
+                    estimated_seconds=estimated_seconds,
+                    cohort_breakdown=cohort_breakdown
+                )
+
             logger.info(f"Main scan: {len(addresses)} addresses across {len(dexes)} exchanges (async)...")
+            phase2_start = time.time()
             positions = fetch_all_positions_async(
                 addresses, mark_prices, dexes,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                resume=allow_resume
             )
+            phase2_elapsed = time.time() - phase2_start
             all_positions.extend(positions)
-            logger.info(f"Main scan found {len(positions)} positions")
+            logger.info(f"Main scan found {len(positions)} positions in {phase2_elapsed:.1f}s")
+
+            # Send phase complete alert during deployment
+            if notify_cohorts:
+                exchange_counts = {}
+                for p in positions:
+                    exchange_counts[p.exchange] = exchange_counts.get(p.exchange, 0) + 1
+                extra_info = f"📈 By exchange: {', '.join(f'{k}={v}' for k, v in exchange_counts.items())}"
+                service.alerts.send_phase_complete_alert(
+                    phase_name="Phase 2: Position Scan",
+                    results_count=len(positions),
+                    elapsed_seconds=phase2_elapsed,
+                    extra_info=extra_info
+                )
 
         # Additional scans (for incremental modes like shark-incremental)
         for i, extra_scan in enumerate(additional_scans):
@@ -154,7 +220,8 @@ def run_scan_phase(
                 )
                 extra_positions = fetch_all_positions_async(
                     extra_addresses, mark_prices, extra_dexes,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
+                    resume=allow_resume
                 )
                 all_positions.extend(extra_positions)
                 logger.info(f"Additional scan found {len(extra_positions)} positions")
@@ -170,8 +237,18 @@ def run_scan_phase(
         save_position_csv(positions, str(validated_position_path))
         logger.info(f"Saved {len(positions)} positions to {position_file}")
 
+        # Log position phase details
+        debug_log.log_position_phase(
+            positions=positions,
+            addresses_scanned=len(addresses) if addresses else 0,
+            exchanges_scanned=dexes,
+            elapsed_seconds=phase2_elapsed if 'phase2_elapsed' in dir() else None,
+            resumed=allow_resume
+        )
+
     except requests.exceptions.RequestException as e:
         logger.error(f"Position fetch network error: {type(e).__name__}")
+        debug_log.log_error("position", f"Network error: {type(e).__name__}")
         # Try to use cached data as fallback
         position_file = "data/raw/position_data_monitor.csv"
         if service._can_use_cached_positions(position_file):
@@ -184,37 +261,59 @@ def run_scan_phase(
             validated_position_path = validate_file_path(position_file)
         else:
             logger.error("No valid cached position data available")
+            debug_log.save()
             return 0, 0
     except (OSError, csv.Error) as e:
         logger.error(f"Position data save error: {type(e).__name__}: {e}")
+        debug_log.log_error("position", f"Save error: {type(e).__name__}: {e}")
+        debug_log.save()
         return 0, 0
     except ValueError as e:
         logger.error(f"Invalid file path: {e}")
+        debug_log.log_error("position", f"Path error: {e}")
+        debug_log.save()
         return 0, 0
 
     # Step 3: Run liquidation filter
     logger.info("Step 3: Running liquidation filter...")
+    phase3_start = time.time()
     try:
         filtered_file = "data/processed/filtered_position_data_monitor.csv"
         # Validate output path
         validated_filtered_path = validate_file_path(filtered_file)
         stats = filter_positions(str(validated_position_path), str(validated_filtered_path))
+        phase3_elapsed = time.time() - phase3_start
         if not stats:
             logger.error("Filter returned no results")
+            debug_log.log_error("filter", "No results returned")
+            debug_log.save()
             return 0, 0
         logger.info(f"Filter complete: {stats.get('filtered_count', 0)} positions with liq prices")
+
+        # Log filter phase details
+        debug_log.log_filter_phase(
+            stats=stats,
+            elapsed_seconds=phase3_elapsed
+        )
     except requests.exceptions.RequestException as e:
         logger.error(f"Filter network error (order book fetch): {type(e).__name__}")
+        debug_log.log_error("filter", f"Network error: {type(e).__name__}")
+        debug_log.save()
         return 0, 0
     except (OSError, csv.Error) as e:
         logger.error(f"Filter file error: {type(e).__name__}: {e}")
+        debug_log.log_error("filter", f"File error: {type(e).__name__}: {e}")
+        debug_log.save()
         return 0, 0
     except ValueError as e:
         logger.error(f"Filter error: {e}")
+        debug_log.log_error("filter", f"Value error: {e}")
+        debug_log.save()
         return 0, 0
 
     # Step 4: Build new watchlist and detect new positions
     logger.info("Step 4: Building watchlist and detecting new positions...")
+    phase4_start = time.time()
     filtered_positions = load_filtered_positions(str(validated_filtered_path))
     new_watchlist = build_watchlist(filtered_positions)
 
@@ -226,6 +325,28 @@ def run_scan_phase(
         is_baseline=is_baseline,
         manual_mode=service.manual_mode,
     )
+    phase4_elapsed = time.time() - phase4_start
+
+    # Log watchlist phase details
+    debug_log.log_watchlist_phase(
+        watchlist=new_watchlist,
+        new_positions=new_positions,
+        baseline_size=len(service.baseline_position_keys),
+        previous_size=len(service.previous_position_keys),
+        elapsed_seconds=phase4_elapsed
+    )
+
+    # Send combined Phase 3+4 completion alert during deployment
+    if notify_cohorts:
+        watchlist_isolated = sum(1 for p in new_watchlist.values() if p.is_isolated)
+        watchlist_cross = len(new_watchlist) - watchlist_isolated
+        service.alerts.send_pipeline_complete_alert(
+            filter_stats=stats,
+            watchlist_size=len(new_watchlist),
+            watchlist_isolated=watchlist_isolated,
+            watchlist_cross=watchlist_cross,
+            new_positions=new_positions,
+        )
 
     # Step 5: Send alerts for new positions
     if new_positions:
@@ -277,6 +398,9 @@ def run_scan_phase(
     logger.info("=" * 60)
     logger.info(f"SCAN PHASE COMPLETE - {len(service.watchlist)} positions in watchlist")
     logger.info("=" * 60)
+
+    # Save debug log
+    debug_log.save()
 
     # Send scan summary alert (only during startup)
     if send_summary:

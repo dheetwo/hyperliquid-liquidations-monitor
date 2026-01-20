@@ -17,10 +17,13 @@ Supports both sync and async modes for API calls.
 
 import asyncio
 import csv
+import json
 import logging
+import os
 import requests
 import time
-from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import asdict
+from typing import List, Dict, Any, Optional, Tuple, Set
 from datetime import datetime
 from pathlib import Path
 
@@ -89,8 +92,11 @@ BATCH_DELAY = 2.0    # seconds between batches of 50
 DEX_DELAY = 0.1      # seconds between dex queries for same address
 
 # Async concurrency settings
-MAX_CONCURRENT_REQUESTS = 20  # Max concurrent API calls
-ASYNC_REQUEST_DELAY = 0.05    # Small delay between launching requests
+MAX_CONCURRENT_REQUESTS = 30  # Max concurrent API calls (increased from 20)
+ASYNC_REQUEST_DELAY = 0.0     # No stagger - semaphore handles rate limiting
+
+# Progress save settings
+PROGRESS_SAVE_INTERVAL = 25   # Save progress every N addresses
 
 
 def load_cohort_addresses(
@@ -514,20 +520,149 @@ async def async_fetch_all_mark_prices(
     return all_prices
 
 
+# =============================================================================
+# PROGRESS TRACKING FOR RESUME CAPABILITY
+# =============================================================================
+
+PROGRESS_FILE = "data/raw/.position_scan_progress.json"
+
+
+def _load_scan_progress(progress_file: str = PROGRESS_FILE) -> Optional[Dict]:
+    """
+    Load scan progress from file for resume capability.
+
+    Returns:
+        Dict with 'scanned_addresses', 'positions', 'dexes', 'timestamp' or None
+    """
+    try:
+        if os.path.exists(progress_file):
+            with open(progress_file, 'r') as f:
+                progress = json.load(f)
+                # Validate progress is recent (within 30 minutes)
+                if progress.get('timestamp'):
+                    progress_time = datetime.fromisoformat(progress['timestamp'])
+                    age_minutes = (datetime.now() - progress_time).total_seconds() / 60
+                    if age_minutes > 30:
+                        logger.info(f"Progress file is {age_minutes:.1f} min old, starting fresh")
+                        return None
+                return progress
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug(f"Could not load progress file: {e}")
+    return None
+
+
+def _save_scan_progress(
+    scanned_addresses: Set[str],
+    positions: List['Position'],
+    dexes: List[str],
+    progress_file: str = PROGRESS_FILE
+):
+    """
+    Save scan progress to file for resume capability.
+    """
+    try:
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(progress_file), exist_ok=True)
+
+        progress = {
+            'timestamp': datetime.now().isoformat(),
+            'scanned_addresses': list(scanned_addresses),
+            'dexes': dexes,
+            'positions': [
+                {
+                    'address': p.address,
+                    'token': p.token,
+                    'side': p.side,
+                    'size': p.size,
+                    'leverage': p.leverage,
+                    'leverage_type': p.leverage_type,
+                    'entry_price': p.entry_price,
+                    'mark_price': p.mark_price,
+                    'position_value': p.position_value,
+                    'unrealized_pnl': p.unrealized_pnl,
+                    'roe': p.roe,
+                    'liquidation_price': p.liquidation_price,
+                    'margin_used': p.margin_used,
+                    'funding_since_open': p.funding_since_open,
+                    'cohort': p.cohort,
+                    'exchange': p.exchange,
+                    'is_isolated': p.is_isolated,
+                }
+                for p in positions
+            ]
+        }
+
+        # Write atomically using temp file
+        temp_file = progress_file + '.tmp'
+        with open(temp_file, 'w') as f:
+            json.dump(progress, f)
+        os.replace(temp_file, progress_file)
+
+    except OSError as e:
+        logger.warning(f"Could not save progress: {e}")
+
+
+def _clear_scan_progress(progress_file: str = PROGRESS_FILE):
+    """Remove progress file after successful completion."""
+    try:
+        if os.path.exists(progress_file):
+            os.remove(progress_file)
+    except OSError:
+        pass
+
+
+def _positions_from_progress(progress: Dict, mark_prices: Dict[str, float]) -> List['Position']:
+    """Reconstruct Position objects from saved progress."""
+    positions = []
+    for p in progress.get('positions', []):
+        try:
+            # Update mark price to current value
+            token = p['token']
+            current_mark = mark_prices.get(token, p['mark_price'])
+
+            positions.append(Position(
+                address=p['address'],
+                token=token,
+                side=p['side'],
+                size=p['size'],
+                leverage=p['leverage'],
+                leverage_type=p['leverage_type'],
+                entry_price=p['entry_price'],
+                mark_price=current_mark,
+                position_value=p['position_value'],
+                unrealized_pnl=p['unrealized_pnl'],
+                roe=p['roe'],
+                liquidation_price=p['liquidation_price'],
+                margin_used=p['margin_used'],
+                funding_since_open=p['funding_since_open'],
+                cohort=p['cohort'],
+                exchange=p['exchange'],
+                is_isolated=p['is_isolated'],
+            ))
+        except (KeyError, TypeError) as e:
+            logger.debug(f"Could not restore position: {e}")
+    return positions
+
+
 async def async_fetch_all_positions(
     addresses: List[Tuple[str, str]],
     mark_prices: Dict[str, float],
     dexes: List[str] = None,
-    progress_callback: callable = None
+    progress_callback: callable = None,
+    resume: bool = True
 ) -> List[Position]:
     """
-    Async version: Fetch positions for all addresses with concurrent requests.
+    Async version: Fetch positions for all addresses with concurrent streaming.
+
+    Uses true streaming (not batched) for maximum throughput. Saves progress
+    periodically to allow resuming if interrupted.
 
     Args:
         addresses: List of (address, cohort) tuples
         mark_prices: Dict of token -> mark price
         dexes: List of dex identifiers to query (default: ALL_DEXES)
         progress_callback: Optional callback(processed, total, positions_found, cohort)
+        resume: If True, try to resume from previous progress file
 
     Returns:
         List of all Position objects
@@ -535,58 +670,78 @@ async def async_fetch_all_positions(
     if dexes is None:
         dexes = ALL_DEXES
 
-    all_positions = []
+    all_positions: List[Position] = []
+    scanned_addresses: Set[str] = set()
     total = len(addresses)
     sub_exchange_positions = 0
+    processed_count = 0
 
-    # Group addresses by cohort for progress tracking
-    cohort_indices = {}
+    # Check for resume capability
+    if resume:
+        progress = _load_scan_progress()
+        if progress and progress.get('dexes') == dexes:
+            scanned_addresses = set(progress.get('scanned_addresses', []))
+            all_positions = _positions_from_progress(progress, mark_prices)
+            sub_exchange_positions = sum(1 for p in all_positions if p.exchange != "main")
+            logger.info(f"Resuming scan: {len(scanned_addresses)} addresses already scanned, "
+                       f"{len(all_positions)} positions loaded")
+
+    # Filter out already-scanned addresses
+    remaining_addresses = [
+        (addr, cohort) for addr, cohort in addresses
+        if addr not in scanned_addresses
+    ]
+
+    if not remaining_addresses:
+        logger.info("All addresses already scanned, returning cached results")
+        _clear_scan_progress()
+        return all_positions
+
+    logger.info(f"Scanning {len(remaining_addresses)} addresses "
+               f"({len(scanned_addresses)} already done, {total} total)")
+
+    # Track cohort transitions
+    cohort_map = {addr: cohort for addr, cohort in addresses}
     current_cohort = None
-    for i, (address, cohort) in enumerate(addresses):
-        if cohort != current_cohort:
-            cohort_indices[i] = cohort
-            current_cohort = cohort
+    last_progress_save = 0
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
     async with aiohttp.ClientSession() as session:
-        # Process in batches to allow progress updates and avoid overwhelming the API
-        batch_size = 50
-        for batch_start in range(0, total, batch_size):
-            batch_end = min(batch_start + batch_size, total)
-            batch = addresses[batch_start:batch_end]
+        # Create all tasks upfront for true streaming
+        async def fetch_address(address: str, cohort: str, index: int):
+            """Fetch positions for a single address."""
+            positions_with_exchange = await async_fetch_all_positions_for_address(
+                session, semaphore, address, dexes
+            )
+            return (positions_with_exchange, address, cohort, index)
 
-            # Check for cohort transitions in this batch and notify
-            for i in range(batch_start, batch_end):
-                if i in cohort_indices:
-                    cohort = cohort_indices[i]
-                    logger.info(f"Starting cohort: {cohort}")
+        # Launch all tasks
+        tasks = [
+            asyncio.create_task(fetch_address(addr, cohort, i))
+            for i, (addr, cohort) in enumerate(remaining_addresses)
+        ]
+
+        # Process results as they complete (streaming)
+        for completed_task in asyncio.as_completed(tasks):
+            try:
+                result = await completed_task
+                positions_with_exchange, address, cohort, index = result
+
+                # Track cohort transitions for logging
+                if cohort != current_cohort:
+                    current_cohort = cohort
+                    logger.info(f"Processing cohort: {cohort}")
                     if progress_callback:
                         try:
-                            progress_callback(i, total, len(all_positions), cohort)
+                            progress_callback(
+                                len(scanned_addresses), total,
+                                len(all_positions), cohort
+                            )
                         except Exception as e:
                             logger.debug(f"Progress callback error: {e}")
 
-            # Fetch all addresses in batch concurrently
-            async def fetch_address(addr_tuple):
-                address, cohort = addr_tuple
-                await asyncio.sleep(ASYNC_REQUEST_DELAY)  # Small stagger
-                return (
-                    await async_fetch_all_positions_for_address(session, semaphore, address, dexes),
-                    address,
-                    cohort
-                )
-
-            tasks = [fetch_address(addr_tuple) for addr_tuple in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Process results
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.debug(f"Error in batch: {result}")
-                    continue
-
-                positions_with_exchange, address, cohort = result
+                # Parse and collect positions
                 for raw_pos, exchange in positions_with_exchange:
                     position = parse_position(address, cohort, raw_pos, mark_prices, exchange)
                     if position:
@@ -594,8 +749,26 @@ async def async_fetch_all_positions(
                         if exchange != "main":
                             sub_exchange_positions += 1
 
-            logger.info(f"Progress: {batch_end}/{total} addresses processed "
-                       f"({len(all_positions)} positions, {sub_exchange_positions} from sub-exchanges)")
+                # Mark address as scanned
+                scanned_addresses.add(address)
+                processed_count += 1
+
+                # Save progress periodically
+                if processed_count - last_progress_save >= PROGRESS_SAVE_INTERVAL:
+                    _save_scan_progress(scanned_addresses, all_positions, dexes)
+                    last_progress_save = processed_count
+                    logger.info(f"Progress: {len(scanned_addresses)}/{total} addresses "
+                               f"({len(all_positions)} positions, {sub_exchange_positions} sub-exchange)")
+
+            except Exception as e:
+                logger.debug(f"Error processing address: {e}")
+
+        # Final progress log
+        logger.info(f"Progress: {len(scanned_addresses)}/{total} addresses "
+                   f"({len(all_positions)} positions, {sub_exchange_positions} sub-exchange)")
+
+    # Clear progress file on successful completion
+    _clear_scan_progress()
 
     logger.info(f"Completed: {total} addresses, {len(all_positions)} positions found "
                f"({sub_exchange_positions} from sub-exchanges)")
@@ -606,7 +779,8 @@ def fetch_all_positions_async(
     addresses: List[Tuple[str, str]],
     mark_prices: Dict[str, float],
     dexes: List[str] = None,
-    progress_callback: callable = None
+    progress_callback: callable = None,
+    resume: bool = True
 ) -> List[Position]:
     """
     Sync wrapper for async_fetch_all_positions.
@@ -617,12 +791,13 @@ def fetch_all_positions_async(
         mark_prices: Dict of token -> mark price
         dexes: List of dex identifiers to query (default: ALL_DEXES)
         progress_callback: Optional callback(processed, total, positions_found, cohort)
+        resume: If True, try to resume from previous progress file
 
     Returns:
         List of all Position objects
     """
     return asyncio.run(async_fetch_all_positions(
-        addresses, mark_prices, dexes, progress_callback
+        addresses, mark_prices, dexes, progress_callback, resume
     ))
 
 

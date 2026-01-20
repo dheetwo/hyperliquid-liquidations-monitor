@@ -27,6 +27,7 @@ from .step2_position import (
     fetch_all_positions,
     fetch_all_positions_async,
     fetch_all_positions_for_address,
+    fetch_all_mark_prices_async,
     save_to_csv as save_position_csv,
     run_scan_mode,
     run_cohort_scan,
@@ -36,19 +37,14 @@ from .step2_position import (
     NORMAL_COHORTS,
     ALL_DEXES,
     CORE_DEXES,
+    # Progress tracking
+    _clear_scan_progress as clear_position_scan_progress,
 )
 
 # Step 3: Liquidation filter
 from .step3_filter import (
     filter_positions,
     calculate_distance_to_liquidation,
-    calculate_estimated_liquidatable_value,
-    calculate_notional_to_trigger,
-    calculate_price_impact,
-    fetch_order_book,
-    fetch_order_books_for_tokens,
-    CROSS_POSITION_LIQUIDATABLE_RATIO,
-    ORDERBOOK_DELAY,
 )
 
 __all__ = [
@@ -65,6 +61,7 @@ __all__ = [
     "fetch_all_positions",
     "fetch_all_positions_async",
     "fetch_all_positions_for_address",
+    "fetch_all_mark_prices_async",
     "save_position_csv",
     "run_scan_mode",
     "run_cohort_scan",
@@ -74,14 +71,8 @@ __all__ = [
     "NORMAL_COHORTS",
     "ALL_DEXES",
     "CORE_DEXES",
+    "clear_position_scan_progress",
     # Step 3
     "filter_positions",
     "calculate_distance_to_liquidation",
-    "calculate_estimated_liquidatable_value",
-    "calculate_notional_to_trigger",
-    "calculate_price_impact",
-    "fetch_order_book",
-    "fetch_order_books_for_tokens",
-    "CROSS_POSITION_LIQUIDATABLE_RATIO",
-    "ORDERBOOK_DELAY",
 ]

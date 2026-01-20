@@ -15,7 +15,6 @@ from src.utils.paths import validate_file_path
 from src.utils.csv_helpers import sanitize_csv_value
 from config.monitor_settings import (
     MAX_WATCH_DISTANCE_PCT,
-    MIN_HUNTING_SCORE,
     WATCHLIST_MIN_NOTIONAL_ISOLATED,
     WATCHLIST_MIN_NOTIONAL_CROSS,
     WATCHLIST_MIN_NOTIONAL_BY_TOKEN,
@@ -75,7 +74,6 @@ def build_watchlist(filtered_positions: List[Dict]) -> Dict[str, WatchedPosition
 
     Filters by:
     - Distance within MAX_WATCH_DISTANCE_PCT
-    - Hunting score above MIN_HUNTING_SCORE
     - Notional value thresholds (varies by token and margin type)
 
     Args:
@@ -98,14 +96,11 @@ def build_watchlist(filtered_positions: List[Dict]) -> Dict[str, WatchedPosition
             liq_price = float(row['Liquidation Price'])
             position_value = float(row['Position Value'])
             is_isolated = row['Isolated'].lower() == 'true'
-            hunting_score = float(row['Hunting Score'])
             distance_pct = float(row['Distance to Liq (%)'])
             current_price = float(row['Current Price'])
 
             # Apply distance filter
             if distance_pct > MAX_WATCH_DISTANCE_PCT:
-                continue
-            if hunting_score < MIN_HUNTING_SCORE:
                 continue
 
             # Apply notional filters
@@ -130,7 +125,6 @@ def build_watchlist(filtered_positions: List[Dict]) -> Dict[str, WatchedPosition
                 liq_price=liq_price,
                 position_value=position_value,
                 is_isolated=is_isolated,
-                hunting_score=hunting_score,
                 last_distance_pct=distance_pct,
                 last_mark_price=current_price,
                 threshold_pct=get_proximity_alert_threshold(),
@@ -199,8 +193,8 @@ def detect_new_positions(
         ):
             new_positions.append(pos)
 
-    # Sort by hunting score descending
-    new_positions.sort(key=lambda p: p.hunting_score, reverse=True)
+    # Sort by distance to liquidation (closest first)
+    new_positions.sort(key=lambda p: p.last_distance_pct)
 
     comparison_type = "previous scan" if (manual_mode or is_baseline) else "baseline"
     logger.info(

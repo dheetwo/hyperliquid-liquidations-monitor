@@ -85,7 +85,6 @@ class MonitorDatabase:
                     liq_price REAL NOT NULL,
                     position_value REAL NOT NULL,
                     is_isolated INTEGER NOT NULL,
-                    hunting_score REAL NOT NULL,
                     last_distance_pct REAL,
                     last_mark_price REAL,
                     threshold_pct REAL,
@@ -171,15 +170,15 @@ class MonitorDatabase:
                 conn.execute("""
                     INSERT INTO watchlist (
                         position_key, address, token, exchange, side,
-                        liq_price, position_value, is_isolated, hunting_score,
+                        liq_price, position_value, is_isolated,
                         last_distance_pct, last_mark_price, threshold_pct,
                         alerted_proximity, alerted_critical, in_critical_zone,
                         first_seen_scan, alert_message_id, last_proximity_message_id,
                         updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     key, pos.address, pos.token, pos.exchange, pos.side,
-                    pos.liq_price, pos.position_value, int(pos.is_isolated), pos.hunting_score,
+                    pos.liq_price, pos.position_value, int(pos.is_isolated),
                     pos.last_distance_pct, pos.last_mark_price, pos.threshold_pct,
                     int(pos.alerted_proximity), int(pos.alerted_critical), int(pos.in_critical_zone),
                     pos.first_seen_scan, pos.alert_message_id, pos.last_proximity_message_id,
@@ -210,7 +209,6 @@ class MonitorDatabase:
                 'liq_price': row['liq_price'],
                 'position_value': row['position_value'],
                 'is_isolated': bool(row['is_isolated']),
-                'hunting_score': row['hunting_score'],
                 'last_distance_pct': row['last_distance_pct'],
                 'last_mark_price': row['last_mark_price'],
                 'threshold_pct': row['threshold_pct'],

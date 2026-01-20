@@ -674,6 +674,184 @@ class TelegramAlerts:
         message = "\n".join(lines)
         return self._send_message(message, skip_rate_limit=True)
 
+    def send_phase_start_alert(
+        self,
+        phase_name: str,
+        address_count: int,
+        exchange_count: int,
+        estimated_seconds: float,
+        cohort_breakdown: dict = None,
+        timestamp: datetime = None
+    ) -> Optional[int]:
+        """
+        Send notification when a pipeline phase is starting.
+        Only includes estimated time if > 60 seconds.
+
+        Args:
+            phase_name: Name of the phase (e.g., "Position Scan")
+            address_count: Number of addresses to scan
+            exchange_count: Number of exchanges per address
+            estimated_seconds: Estimated runtime in seconds
+            cohort_breakdown: Optional dict of cohort -> count
+            timestamp: Timestamp (default: now)
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc)
+
+        timestamp_et = timestamp.astimezone(EASTERN_TZ)
+        total_requests = address_count * exchange_count
+
+        lines = [
+            f"<b>🔄 {phase_name} Starting</b>",
+            "",
+            f"📊 Addresses: {address_count:,}",
+            f"🔄 Exchanges: {exchange_count}",
+            f"📡 API calls: {total_requests:,}",
+        ]
+
+        # Only show estimated time if > 60 seconds
+        if estimated_seconds > 60:
+            minutes = estimated_seconds / 60
+            lines.append("")
+            lines.append(f"<b>⏱ Estimated wait: {minutes:.1f} min</b>")
+
+        # Add cohort breakdown if provided
+        if cohort_breakdown:
+            lines.append("")
+            lines.append("Cohorts:")
+            for cohort, count in cohort_breakdown.items():
+                if count > 0:
+                    lines.append(f"  • {cohort}: {count:,}")
+
+        lines.append("")
+        lines.append(f"<i>{timestamp_et.strftime('%H:%M:%S %Z')}</i>")
+
+        message = "\n".join(lines)
+        return self._send_message(message, skip_rate_limit=True)
+
+    def send_phase_complete_alert(
+        self,
+        phase_name: str,
+        results_count: int,
+        elapsed_seconds: float,
+        extra_info: str = None,
+        timestamp: datetime = None
+    ) -> Optional[int]:
+        """
+        Send notification when a pipeline phase completes.
+
+        Args:
+            phase_name: Name of the phase
+            results_count: Number of results (positions, etc.)
+            elapsed_seconds: Actual runtime in seconds
+            extra_info: Optional additional info line
+            timestamp: Timestamp (default: now)
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc)
+
+        timestamp_et = timestamp.astimezone(EASTERN_TZ)
+
+        lines = [
+            f"<b>✅ {phase_name} Complete</b>",
+            "",
+            f"📊 Results: {results_count:,}",
+            f"⏱ Time: {elapsed_seconds:.1f}s",
+        ]
+
+        if extra_info:
+            lines.append(extra_info)
+
+        lines.append("")
+        lines.append(f"<i>{timestamp_et.strftime('%H:%M:%S %Z')}</i>")
+
+        message = "\n".join(lines)
+        return self._send_message(message, skip_rate_limit=True)
+
+    def send_pipeline_complete_alert(
+        self,
+        filter_stats: dict,
+        watchlist_size: int,
+        watchlist_isolated: int,
+        watchlist_cross: int,
+        new_positions: list,
+        timestamp: datetime = None
+    ) -> Optional[int]:
+        """
+        Send combined Phase 3+4 pipeline completion alert.
+
+        Args:
+            filter_stats: Stats from Phase 3 filter (filtered_count, within_3pct, within_10pct)
+            watchlist_size: Total positions in watchlist
+            watchlist_isolated: Number of isolated positions in watchlist
+            watchlist_cross: Number of cross positions in watchlist
+            new_positions: List of WatchedPosition objects that pass alert thresholds
+            timestamp: Timestamp (default: now)
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc)
+
+        timestamp_et = timestamp.astimezone(EASTERN_TZ)
+
+        lines = [
+            "<b>Scan Pipeline Complete</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "<b>Phase 3: Liquidation Filter</b>",
+            f"{filter_stats.get('filtered_count', 0):,} positions with liq prices",
+            f"≤3%: {filter_stats.get('within_3pct', 0)} | ≤10%: {filter_stats.get('within_10pct', 0)}",
+            "",
+            "<b>Phase 4: Watchlist</b>",
+        ]
+
+        # Add position details for those passing alert thresholds
+        if new_positions:
+            lines.append("")
+            for pos in new_positions:
+                # Format: Token Side | $Value | iso/cross | distance%
+                margin_type = "iso" if pos.is_isolated else "cross"
+                value_str = self._format_value(pos.position_value)
+                lines.append(f"{pos.token} {pos.side} | {value_str} | {margin_type} | {pos.last_distance_pct:.2f}%")
+
+                # Truncated address with hyperlink
+                addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
+                hypurrscan_url = f"https://hypurrscan.io/address/{pos.address}"
+                lines.append(f'<a href="{hypurrscan_url}">{addr_short}</a>')
+                lines.append("")
+
+        # Show remaining watchlist count
+        remaining = watchlist_size - len(new_positions)
+        if remaining > 0:
+            lines.append(f"+{remaining} more on watchlist")
+        elif watchlist_size == 0:
+            lines.append("No positions on watchlist")
+
+        lines.append("")
+        lines.append(f"{timestamp_et.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        message = "\n".join(lines)
+        return self._send_message(message, skip_rate_limit=True)
+
+    def _format_value(self, value: float) -> str:
+        """Format a dollar value for display (e.g., $16.3M, $1.27M, $500K)."""
+        if value >= 1_000_000_000:
+            return f"${value / 1_000_000_000:.1f}B"
+        elif value >= 1_000_000:
+            return f"${value / 1_000_000:.1f}M"
+        elif value >= 1_000:
+            return f"${value / 1_000:.0f}K"
+        else:
+            return f"${value:.0f}"
+
     def send_service_status(
         self,
         status: str,
