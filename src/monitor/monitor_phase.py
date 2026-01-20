@@ -27,6 +27,9 @@ from config.monitor_settings import (
     CRITICAL_REFRESH_MAX_INTERVAL,
     CRITICAL_REFRESH_SCALE_FACTOR,
     MAX_CRITICAL_POSITIONS,
+    COLLATERAL_CHANGE_MIN_PCT,
+    PARTIAL_LIQ_THRESHOLD_PCT,
+    ALERT_NATURAL_RECOVERY,
 )
 
 if TYPE_CHECKING:
@@ -62,6 +65,11 @@ def refresh_critical_positions(service: 'MonitorService', mark_prices: Dict) -> 
     Fetches fresh clearinghouseState for each critical position to get
     updated liquidation prices (in case of margin changes).
 
+    Also detects:
+    - Collateral additions (liq price moves away from current price)
+    - Partial liquidations (position value drops significantly)
+    - Full liquidations (position disappears)
+
     Args:
         service: MonitorService instance
         mark_prices: Current mark prices by exchange
@@ -69,6 +77,8 @@ def refresh_critical_positions(service: 'MonitorService', mark_prices: Dict) -> 
     Returns:
         Number of positions refreshed
     """
+    from src.utils.prices import get_current_price
+
     critical_positions = [
         pos for pos in service.watchlist.values()
         if pos.in_critical_zone
@@ -87,8 +97,15 @@ def refresh_critical_positions(service: 'MonitorService', mark_prices: Dict) -> 
         critical_positions = critical_positions[:MAX_CRITICAL_POSITIONS]
 
     refreshed = 0
+    positions_to_remove = []
+
     for position in critical_positions:
         try:
+            # Store previous state for change detection
+            old_liq_price = position.liq_price
+            old_position_value = position.position_value
+            old_distance = position.last_distance_pct
+
             # Fetch fresh position data for this address
             dexes = [""] if position.exchange == "main" else [position.exchange]
             positions = fetch_all_positions_for_address(
@@ -98,6 +115,7 @@ def refresh_critical_positions(service: 'MonitorService', mark_prices: Dict) -> 
             )
 
             # Find the matching position
+            position_found = False
             for pos_data in positions:
                 pos_dict, exchange = pos_data
                 pos_obj = pos_dict.get("position", {})
@@ -112,27 +130,149 @@ def refresh_critical_positions(service: 'MonitorService', mark_prices: Dict) -> 
                     exchange == position.exchange and
                     side == position.side
                 ):
-                    # Update liquidation price if changed
+                    position_found = True
+
+                    # Get new values
                     new_liq_px = pos_obj.get("liquidationPx")
+                    new_value = float(pos_obj.get("positionValue", 0)) if pos_obj.get("positionValue") else 0
+
+                    # Check for partial liquidation (value dropped significantly)
+                    if old_position_value > 0 and new_value > 0:
+                        value_drop_pct = (old_position_value - new_value) / old_position_value
+                        if value_drop_pct >= PARTIAL_LIQ_THRESHOLD_PCT / 100:
+                            # Get current price for the alert
+                            current_price = get_current_price(position.token, position.exchange, mark_prices)
+
+                            logger.info(
+                                f"PARTIAL LIQUIDATION detected: {position.token} {position.side} "
+                                f"value dropped {value_drop_pct*100:.1f}% "
+                                f"(${old_position_value/1e6:.2f}M -> ${new_value/1e6:.2f}M)"
+                            )
+                            reply_to = position.last_proximity_message_id or position.alert_message_id
+                            msg_id = service.alerts.send_liquidation_alert(
+                                position,
+                                liquidation_type="partial",
+                                old_value=old_position_value,
+                                new_value=new_value,
+                                last_distance=old_distance,
+                                current_price=current_price,
+                                reply_to_message_id=reply_to
+                            )
+                            if msg_id:
+                                position.last_proximity_message_id = msg_id
+                                position.alerted_liquidation = True
+                                service.db.log_liquidation_event(
+                                    position_key=position.position_key,
+                                    event_type="partial_liquidation",
+                                    old_value=old_position_value,
+                                    new_value=new_value,
+                                    details=f"Value dropped {value_drop_pct*100:.1f}%"
+                                )
+
+                    # Update liquidation price and check for collateral addition
                     if new_liq_px is not None:
                         new_liq_price = float(new_liq_px)
-                        if new_liq_price != position.liq_price:
+
+                        # Check for collateral addition (liq price moved to safer level)
+                        if old_liq_price and new_liq_price != old_liq_price:
+                            liq_change_pct = abs(new_liq_price - old_liq_price) / old_liq_price * 100
+
+                            # Determine if liq moved to a safer level
+                            if position.side == "Long":
+                                liq_moved_safer = new_liq_price < old_liq_price
+                            else:  # Short
+                                liq_moved_safer = new_liq_price > old_liq_price
+
+                            # Only alert if significant change and moved safer (collateral added)
+                            if liq_moved_safer and liq_change_pct >= COLLATERAL_CHANGE_MIN_PCT:
+                                # Calculate new distance
+                                current_price = get_current_price(position.token, position.exchange, mark_prices)
+                                if current_price > 0:
+                                    new_distance = calculate_distance_to_liquidation(
+                                        current_price, new_liq_price, position.side
+                                    )
+
+                                    logger.info(
+                                        f"COLLATERAL ADDED detected: {position.token} {position.side} "
+                                        f"liq price {old_liq_price:.4f} -> {new_liq_price:.4f} "
+                                        f"({liq_change_pct:.1f}% safer)"
+                                    )
+
+                                    if not position.alerted_collateral_added:
+                                        reply_to = position.last_proximity_message_id or position.alert_message_id
+                                        msg_id = service.alerts.send_collateral_added_alert(
+                                            position,
+                                            old_liq_price=old_liq_price,
+                                            new_liq_price=new_liq_price,
+                                            old_distance=old_distance,
+                                            new_distance=new_distance,
+                                            reply_to_message_id=reply_to
+                                        )
+                                        if msg_id:
+                                            position.last_proximity_message_id = msg_id
+                                            position.alerted_collateral_added = True
+                                            service.db.log_liquidation_event(
+                                                position_key=position.position_key,
+                                                event_type="collateral_added",
+                                                old_liq_price=old_liq_price,
+                                                new_liq_price=new_liq_price,
+                                                details=f"Liq price moved {liq_change_pct:.1f}% safer"
+                                            )
+
                             logger.info(
                                 f"Critical position {position.token} liq price updated: "
-                                f"{position.liq_price:.4f} -> {new_liq_price:.4f}"
+                                f"{old_liq_price:.4f} -> {new_liq_price:.4f}"
                             )
-                            position.liq_price = new_liq_price
 
-                    # Update position value if changed
-                    new_value = pos_obj.get("positionValue")
-                    if new_value:
-                        position.position_value = float(new_value)
+                        # Store previous values for next comparison
+                        position.previous_liq_price = old_liq_price
+                        position.liq_price = new_liq_price
+
+                    # Update position value
+                    if new_value > 0:
+                        position.previous_position_value = old_position_value
+                        position.position_value = new_value
 
                     refreshed += 1
                     break
 
+            # Check for full liquidation (position disappeared)
+            if not position_found:
+                # Get current price for the alert
+                current_price = get_current_price(position.token, position.exchange, mark_prices)
+
+                logger.info(
+                    f"FULL LIQUIDATION detected: {position.token} {position.side} "
+                    f"position disappeared (was ${old_position_value/1e6:.2f}M at {old_distance:.2f}%)"
+                )
+                reply_to = position.last_proximity_message_id or position.alert_message_id
+                msg_id = service.alerts.send_liquidation_alert(
+                    position,
+                    liquidation_type="full",
+                    old_value=old_position_value,
+                    new_value=0,
+                    last_distance=old_distance,
+                    current_price=current_price,
+                    reply_to_message_id=reply_to
+                )
+                if msg_id:
+                    service.db.log_liquidation_event(
+                        position_key=position.position_key,
+                        event_type="full_liquidation",
+                        old_value=old_position_value,
+                        new_value=0,
+                        details=f"Position disappeared at {old_distance:.2f}% distance"
+                    )
+                positions_to_remove.append(position.position_key)
+
         except Exception as e:
             logger.warning(f"Failed to refresh critical position {position.token}: {e}")
+
+    # Remove fully liquidated positions from watchlist
+    for key in positions_to_remove:
+        if key in service.watchlist:
+            del service.watchlist[key]
+            logger.info(f"Removed liquidated position from watchlist: {key}")
 
     if refreshed > 0:
         logger.info(f"Refreshed {refreshed} critical positions")
@@ -227,30 +367,60 @@ def run_monitor_phase(service: 'MonitorService', until: Optional[datetime] = Non
                     was_in_critical_zone and
                     new_distance > RECOVERY_PCT
                 ):
-                    logger.info(
-                        f"RECOVERY: {position.token} {position.side} "
-                        f"recovered from {previous_distance:.3f}% to {new_distance:.2f}%"
+                    # Determine if this is collateral-based recovery or natural price recovery
+                    # Collateral-based: liq_price changed (user added margin)
+                    # Natural: liq_price unchanged (price just moved favorably)
+                    liq_price_changed = (
+                        position.previous_liq_price is not None and
+                        position.previous_liq_price != position.liq_price
                     )
-                    msg_id = service.alerts.send_recovery_alert(
-                        position,
-                        previous_distance,
-                        current_price,
-                        reply_to_message_id=reply_to
-                    )
-                    if msg_id:
-                        position.last_proximity_message_id = msg_id
-                        # Reset alert flags since position recovered
+
+                    if liq_price_changed:
+                        # Collateral was added - this is already handled by collateral_added alert
+                        # Just reset flags and continue without sending duplicate recovery alert
+                        logger.info(
+                            f"RECOVERY (collateral-based): {position.token} {position.side} "
+                            f"recovered from {previous_distance:.3f}% to {new_distance:.2f}% "
+                            f"(liq price changed: {position.previous_liq_price:.4f} -> {position.liq_price:.4f})"
+                        )
+                        position.alerted_critical = False
+                        position.alerted_collateral_added = False  # Reset for next potential event
+                        position.in_critical_zone = False
+                        continue  # Skip - collateral_added alert already sent
+
+                    elif ALERT_NATURAL_RECOVERY:
+                        # Natural price recovery - alert only if configured
+                        logger.info(
+                            f"RECOVERY (natural): {position.token} {position.side} "
+                            f"recovered from {previous_distance:.3f}% to {new_distance:.2f}%"
+                        )
+                        msg_id = service.alerts.send_recovery_alert(
+                            position,
+                            previous_distance,
+                            current_price,
+                            reply_to_message_id=reply_to
+                        )
+                        if msg_id:
+                            position.last_proximity_message_id = msg_id
+                            position.alerted_critical = False
+                            position.in_critical_zone = False
+                            alerts_sent += 1
+                            service.db.log_alert(
+                                position_key=position.position_key,
+                                alert_type="recovery",
+                                message_id=msg_id,
+                                details=f"{previous_distance:.3f}% -> {new_distance:.2f}% (natural)"
+                            )
+                        continue
+                    else:
+                        # Natural recovery but ALERT_NATURAL_RECOVERY is False - silent reset
+                        logger.info(
+                            f"RECOVERY (natural, silent): {position.token} {position.side} "
+                            f"recovered from {previous_distance:.3f}% to {new_distance:.2f}% (no alert)"
+                        )
                         position.alerted_critical = False
                         position.in_critical_zone = False
-                        alerts_sent += 1
-                        # Log to database
-                        service.db.log_alert(
-                            position_key=position.position_key,
-                            alert_type="recovery",
-                            message_id=msg_id,
-                            details=f"{previous_distance:.3f}% -> {new_distance:.2f}%"
-                        )
-                    continue  # Skip other checks for this position
+                        continue  # Skip other checks for this position
 
                 # Check for CRITICAL alert (crossing below 0.1%)
                 if (

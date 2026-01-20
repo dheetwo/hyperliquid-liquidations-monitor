@@ -91,6 +91,14 @@ class WatchedPosition:
     alert_message_id: int = None  # Telegram message_id for reply threading
     last_proximity_message_id: int = None  # Last proximity/critical alert message_id
 
+    # Previous state for change detection (liquidation status monitoring)
+    previous_liq_price: Optional[float] = None
+    previous_position_value: Optional[float] = None
+
+    # Alert flags for liquidation status events
+    alerted_collateral_added: bool = False
+    alerted_liquidation: bool = False
+
     @property
     def cohort_display(self) -> str:
         """Format cohorts for display in alerts."""
