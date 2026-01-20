@@ -197,6 +197,7 @@ PROXIMITY_ALERT_THRESHOLD_PCT = 0.25  # Alert when distance drops below 0.25%
 # AND liquidation price changed (indicating manual intervention).
 
 CRITICAL_ALERT_PCT = 0.125    # Alert when crossing below 0.125% (imminent)
+CRITICAL_ZONE_PCT = 0.25      # Threshold for entering critical monitoring zone (same as proximity)
 RECOVERY_PCT = 0.5            # Recovery detection threshold
 
 # Dynamic refresh interval for critical positions
