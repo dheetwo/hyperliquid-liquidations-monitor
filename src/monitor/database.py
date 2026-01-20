@@ -7,15 +7,20 @@ Lightweight persistence layer for:
 - Baseline position keys
 - Position history (with retention)
 - Alert log
+- Service logs (persistent logging)
 
 Storage: data/monitor.db (persisted via Docker volume)
 """
 
 import logging
+import logging.handlers
 import sqlite3
+import threading
+import traceback
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from queue import Queue, Empty
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -26,6 +31,7 @@ logger = logging.getLogger(__name__)
 # Default retention periods
 POSITION_HISTORY_RETENTION_DAYS = 7
 ALERT_LOG_RETENTION_DAYS = 30
+SERVICE_LOG_RETENTION_DAYS = 7
 
 # Database path
 DEFAULT_DB_PATH = Path(__file__).parent.parent.parent / "data" / "monitor.db"
@@ -147,6 +153,26 @@ class MonitorDatabase:
                     value TEXT,
                     updated_at TEXT NOT NULL
                 )
+            """)
+
+            # Service logs (persists logs to database)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS service_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    logger_name TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    exc_info TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_service_logs_time
+                ON service_logs(timestamp)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_service_logs_level
+                ON service_logs(level)
             """)
 
     # =========================================================================
@@ -428,13 +454,114 @@ class MonitorDatabase:
             return row['value'] if row else default
 
     # =========================================================================
+    # Service Log Operations
+    # =========================================================================
+
+    def write_log(
+        self,
+        timestamp: str,
+        level: str,
+        logger_name: str,
+        message: str,
+        exc_info: Optional[str] = None
+    ):
+        """
+        Write a log entry to the database.
+
+        Args:
+            timestamp: ISO format timestamp
+            level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+            logger_name: Name of the logger
+            message: Log message
+            exc_info: Exception info if any
+        """
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO service_logs (timestamp, level, logger_name, message, exc_info)
+                VALUES (?, ?, ?, ?, ?)
+            """, (timestamp, level, logger_name, message, exc_info))
+
+    def write_logs_batch(self, logs: List[dict]):
+        """
+        Write multiple log entries efficiently.
+
+        Args:
+            logs: List of dicts with timestamp, level, logger_name, message, exc_info
+        """
+        with self._get_connection() as conn:
+            conn.executemany("""
+                INSERT INTO service_logs (timestamp, level, logger_name, message, exc_info)
+                VALUES (?, ?, ?, ?, ?)
+            """, [
+                (log['timestamp'], log['level'], log['logger_name'],
+                 log['message'], log.get('exc_info'))
+                for log in logs
+            ])
+
+    def get_logs(
+        self,
+        hours: int = 24,
+        level: Optional[str] = None,
+        limit: int = 1000
+    ) -> List[dict]:
+        """
+        Get recent logs from the database.
+
+        Args:
+            hours: How many hours of logs to fetch
+            level: Filter by log level (optional)
+            limit: Maximum number of logs to return
+
+        Returns:
+            List of log records (newest first)
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+        with self._get_connection() as conn:
+            if level:
+                cursor = conn.execute("""
+                    SELECT * FROM service_logs
+                    WHERE timestamp > ? AND level = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """, (cutoff, level, limit))
+            else:
+                cursor = conn.execute("""
+                    SELECT * FROM service_logs
+                    WHERE timestamp > ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """, (cutoff, limit))
+
+            return [dict(row) for row in cursor.fetchall()]
+
+    def prune_logs(self, days: int = SERVICE_LOG_RETENTION_DAYS) -> int:
+        """
+        Remove old log entries.
+
+        Args:
+            days: Days of logs to keep
+
+        Returns:
+            Number of rows deleted
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM service_logs WHERE timestamp < ?", (cutoff,)
+            )
+            return cursor.rowcount
+
+    # =========================================================================
     # Maintenance Operations
     # =========================================================================
 
     def prune_old_data(
         self,
         history_days: int = POSITION_HISTORY_RETENTION_DAYS,
-        alert_days: int = ALERT_LOG_RETENTION_DAYS
+        alert_days: int = ALERT_LOG_RETENTION_DAYS,
+        log_days: int = SERVICE_LOG_RETENTION_DAYS
     ) -> dict:
         """
         Remove old data to keep database size bounded.
@@ -442,14 +569,16 @@ class MonitorDatabase:
         Args:
             history_days: Days of position history to keep
             alert_days: Days of alert logs to keep
+            log_days: Days of service logs to keep
 
         Returns:
             Dict with counts of deleted rows
         """
         history_cutoff = (datetime.now(timezone.utc) - timedelta(days=history_days)).isoformat()
         alert_cutoff = (datetime.now(timezone.utc) - timedelta(days=alert_days)).isoformat()
+        log_cutoff = (datetime.now(timezone.utc) - timedelta(days=log_days)).isoformat()
 
-        deleted = {'position_history': 0, 'alert_log': 0}
+        deleted = {'position_history': 0, 'alert_log': 0, 'service_logs': 0}
 
         with self._get_connection() as conn:
             cursor = conn.execute(
@@ -462,10 +591,15 @@ class MonitorDatabase:
             )
             deleted['alert_log'] = cursor.rowcount
 
-        if deleted['position_history'] > 0 or deleted['alert_log'] > 0:
+            cursor = conn.execute(
+                "DELETE FROM service_logs WHERE timestamp < ?", (log_cutoff,)
+            )
+            deleted['service_logs'] = cursor.rowcount
+
+        if any(v > 0 for v in deleted.values()):
             logger.info(
-                f"Pruned old data: {deleted['position_history']} history rows, "
-                f"{deleted['alert_log']} alert rows"
+                f"Pruned old data: {deleted['position_history']} history, "
+                f"{deleted['alert_log']} alerts, {deleted['service_logs']} logs"
             )
 
         return deleted
@@ -481,7 +615,7 @@ class MonitorDatabase:
         with self._get_connection() as conn:
             stats = {}
 
-            for table in ['watchlist', 'baseline_positions', 'position_history', 'alert_log']:
+            for table in ['watchlist', 'baseline_positions', 'position_history', 'alert_log', 'service_logs']:
                 cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table}")
                 stats[table] = cursor.fetchone()['count']
 
@@ -515,3 +649,155 @@ class MonitorDatabase:
         if scan_time is None:
             scan_time = datetime.now(timezone.utc)
         self.set_state('last_scan_time', scan_time.isoformat())
+
+
+# =============================================================================
+# SQLite Logging Handler
+# =============================================================================
+
+
+class SQLiteLoggingHandler(logging.Handler):
+    """
+    A logging handler that writes log records to SQLite database.
+
+    Uses a background thread to batch writes and avoid blocking the main thread.
+    Logs are persisted even if the container restarts (as long as the database
+    file is on a volume or in a persistent location).
+    """
+
+    def __init__(
+        self,
+        db_path: Path = DEFAULT_DB_PATH,
+        batch_size: int = 50,
+        flush_interval: float = 5.0,
+        level: int = logging.INFO
+    ):
+        """
+        Initialize the SQLite logging handler.
+
+        Args:
+            db_path: Path to SQLite database file
+            batch_size: Number of logs to batch before writing
+            flush_interval: Max seconds between flushes
+            level: Minimum log level to capture
+        """
+        super().__init__(level)
+        self.db_path = db_path
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+
+        # Ensure database directory exists
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Queue for log records
+        self._queue: Queue = Queue()
+        self._shutdown = threading.Event()
+
+        # Start background writer thread
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop,
+            daemon=True,
+            name="SQLiteLogWriter"
+        )
+        self._writer_thread.start()
+
+    def emit(self, record: logging.LogRecord):
+        """
+        Emit a log record by adding it to the queue.
+
+        Args:
+            record: Log record to emit
+        """
+        try:
+            # Format exception info if present
+            exc_info = None
+            if record.exc_info:
+                exc_info = ''.join(traceback.format_exception(*record.exc_info))
+
+            log_entry = {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'level': record.levelname,
+                'logger_name': record.name,
+                'message': self.format(record),
+                'exc_info': exc_info,
+            }
+            self._queue.put(log_entry)
+        except Exception:
+            # Don't let logging errors crash the app
+            self.handleError(record)
+
+    def _writer_loop(self):
+        """Background loop that batches and writes logs to SQLite."""
+        batch = []
+
+        while not self._shutdown.is_set():
+            try:
+                # Collect logs until batch is full or timeout
+                while len(batch) < self.batch_size:
+                    try:
+                        log_entry = self._queue.get(timeout=self.flush_interval)
+                        batch.append(log_entry)
+                    except Empty:
+                        # Timeout - flush what we have
+                        break
+
+                # Write batch to database
+                if batch:
+                    self._write_batch(batch)
+                    batch = []
+
+            except Exception:
+                # Log writer errors to stderr, don't crash
+                import sys
+                traceback.print_exc(file=sys.stderr)
+                batch = []  # Clear batch to avoid infinite loop
+
+        # Final flush on shutdown
+        if batch:
+            self._write_batch(batch)
+
+        # Drain remaining queue
+        while not self._queue.empty():
+            try:
+                log_entry = self._queue.get_nowait()
+                batch.append(log_entry)
+            except Empty:
+                break
+
+        if batch:
+            self._write_batch(batch)
+
+    def _write_batch(self, batch: List[dict]):
+        """Write a batch of logs to the database."""
+        try:
+            conn = sqlite3.connect(str(self.db_path), timeout=30)
+            try:
+                conn.executemany("""
+                    INSERT INTO service_logs (timestamp, level, logger_name, message, exc_info)
+                    VALUES (?, ?, ?, ?, ?)
+                """, [
+                    (log['timestamp'], log['level'], log['logger_name'],
+                     log['message'], log.get('exc_info'))
+                    for log in batch
+                ])
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            # Write errors to stderr
+            import sys
+            traceback.print_exc(file=sys.stderr)
+
+    def flush(self):
+        """Flush any pending logs."""
+        # Signal the writer thread to flush by waiting for queue to empty
+        while not self._queue.empty():
+            import time
+            time.sleep(0.1)
+
+    def close(self):
+        """Close the handler and flush remaining logs."""
+        self._shutdown.set()
+        if self._writer_thread.is_alive():
+            self._writer_thread.join(timeout=10)
+        super().close()
