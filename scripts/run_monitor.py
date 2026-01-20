@@ -5,24 +5,19 @@ Liquidation Monitor Service - CLI Entry Point
 
 Runs the continuous monitoring service for liquidation hunting opportunities.
 
-Default Mode (Scheduled):
-    Scans at specific times (all EST):
-    - 6:30 AM: Comprehensive scan (baseline reset, full watchlist)
-    - Every hour (:00): Normal scan (alerts only for NEW positions since baseline)
-    - Every 30 min (:30): Priority scan (alerts only for NEW positions since baseline)
-
-Manual Mode (--manual):
-    Fixed interval between scans (original behavior).
+Architecture:
+    - Initial comprehensive scan to populate position cache
+    - Continuous tiered refresh based on liquidation distance:
+      - Critical (<=0.125%): Continuous (~5 req/sec)
+      - High (0.125-0.25%): Every 2-3 seconds
+      - Normal (>0.25%): Every 30 seconds
+    - Dynamic discovery scans for new addresses (frequency based on API pressure)
+    - Two daily summaries at 7am and 4pm EST
+    - No intraday "new position" alerts - quiet backend updates
 
 Usage:
-    # Start monitor with scheduled mode (default)
+    # Start monitor
     python scripts/run_monitor.py
-
-    # Start with manual mode (fixed 90 min interval)
-    python scripts/run_monitor.py --manual
-
-    # Manual mode with custom interval
-    python scripts/run_monitor.py --manual --interval 60
 
     # Dry run (console alerts only, no Telegram)
     python scripts/run_monitor.py --dry-run
@@ -44,13 +39,12 @@ from src.monitor import MonitorService
 from src.monitor.alerts import send_test_alert
 from src.monitor.database import SQLiteLoggingHandler
 from config.monitor_settings import (
-    SCAN_INTERVAL_MINUTES,
     POLL_INTERVAL_SECONDS,
-    DEFAULT_SCAN_MODE,
     LOG_LEVEL,
     LOG_FILE,
-    COMPREHENSIVE_SCAN_HOUR,
-    COMPREHENSIVE_SCAN_MINUTE,
+    DAILY_SUMMARY_TIMES,
+    CACHE_TIER_CRITICAL_PCT,
+    CACHE_TIER_HIGH_PCT,
 )
 
 
@@ -117,40 +111,37 @@ def setup_logging(log_level: str = LOG_LEVEL, log_file: str = LOG_FILE):
     root_logger.info(f"Logs also persisted to SQLite database")
 
 
+def format_summary_times() -> str:
+    """Format daily summary times for display."""
+    times = []
+    for hour, minute in DAILY_SUMMARY_TIMES:
+        period = "AM" if hour < 12 else "PM"
+        display_hour = hour if hour <= 12 else hour - 12
+        if display_hour == 0:
+            display_hour = 12
+        times.append(f"{display_hour}:{minute:02d} {period}")
+    return ", ".join(times)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Liquidation Monitor Service',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
-Scheduled Mode (default):
-  Scans at specific times (EST):
-    - {COMPREHENSIVE_SCAN_HOUR:02d}:{COMPREHENSIVE_SCAN_MINUTE:02d} AM: Comprehensive (baseline)
-    - Every hour (:00): Normal scan
-    - Every 30 min (:30): Priority scan
-
-Manual Mode (--manual):
-  Fixed interval between scans.
+Architecture:
+  - Initial comprehensive scan to populate cache (all cohorts, all exchanges)
+  - Tiered refresh based on liquidation distance:
+    - Critical (<={CACHE_TIER_CRITICAL_PCT}%): Continuous (~5 req/sec)
+    - High ({CACHE_TIER_CRITICAL_PCT}-{CACHE_TIER_HIGH_PCT}%): Every 2-3 seconds
+    - Normal (>{CACHE_TIER_HIGH_PCT}%): Every 30 seconds
+  - Dynamic discovery scans (frequency based on API pressure)
+  - Daily summaries at {format_summary_times()} EST
 
 Examples:
-  python scripts/run_monitor.py                       # Scheduled mode (default)
-  python scripts/run_monitor.py --manual              # Manual mode, 90min interval
-  python scripts/run_monitor.py --manual -i 60       # Manual mode, 60min interval
-  python scripts/run_monitor.py --dry-run             # Console alerts only
-  python scripts/run_monitor.py --test-telegram       # Test Telegram setup
+  python scripts/run_monitor.py                # Start monitor
+  python scripts/run_monitor.py --dry-run      # Console alerts only
+  python scripts/run_monitor.py --test-telegram # Test Telegram setup
         """
-    )
-
-    parser.add_argument(
-        '--manual',
-        action='store_true',
-        help='Use manual mode with fixed interval (default: scheduled time-based mode)'
-    )
-
-    parser.add_argument(
-        '--interval', '-i',
-        type=int,
-        default=SCAN_INTERVAL_MINUTES,
-        help=f'Scan interval in minutes for manual mode (default: {SCAN_INTERVAL_MINUTES})'
     )
 
     parser.add_argument(
@@ -158,13 +149,6 @@ Examples:
         type=int,
         default=POLL_INTERVAL_SECONDS,
         help=f'Price poll interval in seconds (default: {POLL_INTERVAL_SECONDS})'
-    )
-
-    parser.add_argument(
-        '--mode', '-m',
-        choices=['high-priority', 'normal', 'comprehensive'],
-        default=DEFAULT_SCAN_MODE,
-        help=f'Default scan mode for manual mode (default: {DEFAULT_SCAN_MODE})'
     )
 
     parser.add_argument(
@@ -207,13 +191,12 @@ Examples:
     print("\n" + "=" * 60)
     print("LIQUIDATION MONITOR SERVICE")
     print("=" * 60)
-    if args.manual:
-        print(f"Mode:           MANUAL (fixed interval)")
-        print(f"Scan interval:  {args.interval} minutes")
-        print(f"Scan mode:      {args.mode}")
-    else:
-        print(f"Mode:           SCHEDULED (time-based)")
-        print(f"Schedule:       {COMPREHENSIVE_SCAN_HOUR:02d}:{COMPREHENSIVE_SCAN_MINUTE:02d} comprehensive, :00 normal, :30 priority")
+    print(f"Architecture:   Cache-based with tiered refresh")
+    print(f"Refresh tiers:")
+    print(f"  - Critical (<={CACHE_TIER_CRITICAL_PCT}%): Continuous")
+    print(f"  - High ({CACHE_TIER_CRITICAL_PCT}-{CACHE_TIER_HIGH_PCT}%): Every 2-3 sec")
+    print(f"  - Normal (>{CACHE_TIER_HIGH_PCT}%): Every 30 sec")
+    print(f"Daily summaries: {format_summary_times()} EST")
     print(f"Poll interval:  {args.poll} seconds")
     print(f"Dry run:        {args.dry_run}")
     print(f"Log level:      {args.log_level}")
@@ -235,11 +218,8 @@ Examples:
     # Create and run monitor service
     try:
         service = MonitorService(
-            scan_interval_minutes=args.interval,
             poll_interval_seconds=args.poll,
-            scan_mode=args.mode,
             dry_run=args.dry_run,
-            manual_mode=args.manual,
         )
 
         print("\nStarting monitor service...")

@@ -27,25 +27,51 @@ SCAN_INTERVAL_MINUTES = 90
 POLL_INTERVAL_SECONDS = 5
 
 # =============================================================================
-# SCHEDULED SCAN SETTINGS (default mode)
+# POSITION CACHE SETTINGS
 # =============================================================================
-# Times are in EST (Eastern Standard Time)
-#
-# Schedule:
-#   - 6:30 AM EST: Comprehensive scan (baseline reset, full watchlist)
-#   - Every hour (:00): Normal scan (alerts only for NEW positions since baseline)
-#   - Every 30 min (:30): Priority scan (alerts only for NEW positions since baseline)
-#
-# Example daily schedule:
-#   6:30 AM  - Comprehensive (new baseline)
-#   7:00 AM  - Normal
-#   7:30 AM  - Priority
-#   8:00 AM  - Normal
-#   ...
-#   6:30 AM next day - Comprehensive (new baseline)
+# Tiered refresh based on liquidation distance.
+# Critical positions get continuous refresh, normal positions get background refresh.
 
-COMPREHENSIVE_SCAN_HOUR = 6    # Hour of comprehensive scan (24h format, EST)
-COMPREHENSIVE_SCAN_MINUTE = 30  # Minute of comprehensive scan
+# Tiered refresh thresholds (distance to liquidation %)
+CACHE_TIER_CRITICAL_PCT = 0.125   # ≤0.125% = critical tier (continuous refresh)
+CACHE_TIER_HIGH_PCT = 0.25        # 0.125-0.25% = high tier (frequent refresh)
+# >0.25% = normal tier (background refresh)
+
+# Tier refresh intervals (seconds)
+CACHE_REFRESH_CRITICAL_SEC = 0.2  # Rate limit bound (~5 req/sec)
+CACHE_REFRESH_HIGH_SEC = 2.5      # Every 2-3 seconds
+CACHE_REFRESH_NORMAL_SEC = 30.0   # Every 30 seconds
+
+# Discovery settings (find new addresses/positions)
+DISCOVERY_MIN_INTERVAL_MINUTES = 30   # Minimum interval between discoveries
+DISCOVERY_MAX_INTERVAL_MINUTES = 240  # Maximum interval (4 hours)
+DISCOVERY_PRESSURE_CRITICAL_WEIGHT = 15  # Minutes to add per critical position
+DISCOVERY_PRESSURE_HIGH_WEIGHT = 5       # Minutes to add per high position
+
+# Cache freshness
+CACHE_MAX_AGE_MINUTES = 60   # Force initial scan if cache older than this
+CACHE_PRUNE_AGE_HOURS = 24   # Delete positions not refreshed in 24h
+
+# =============================================================================
+# DAILY SUMMARY SETTINGS
+# =============================================================================
+# Two daily summary messages showing all monitored positions.
+# No intraday "new position" alerts - just quiet backend updates.
+
+# Times for daily summary messages (24h format, EST)
+DAILY_SUMMARY_TIMES = [
+    (7, 0),   # 7:00 AM EST
+    (16, 0),  # 4:00 PM EST
+]
+
+# =============================================================================
+# LEGACY SCHEDULED SCAN SETTINGS (deprecated - kept for reference)
+# =============================================================================
+# These settings are no longer used. The system now uses cache-based
+# monitoring with tiered refresh instead of scheduled scans.
+
+COMPREHENSIVE_SCAN_HOUR = 6    # (deprecated)
+COMPREHENSIVE_SCAN_MINUTE = 30  # (deprecated)
 
 # =============================================================================
 # ASSET CLASSIFICATIONS

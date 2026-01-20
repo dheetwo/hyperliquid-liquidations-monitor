@@ -4,41 +4,70 @@ Monitor Service Orchestrator
 
 Main monitoring service for liquidation hunting opportunities.
 
-Alternates between:
-- Scan phase: Full pipeline (cohort -> position -> filter -> detect new)
-- Monitor phase: Poll prices and alert on proximity threshold breach
-
-Two operating modes:
-- Scheduled mode (default): Time-based scan scheduling
-- Manual mode: Fixed interval between scans
+Architecture:
+- Initial comprehensive scan to populate position cache
+- Continuous tiered refresh based on liquidation distance:
+  - Critical (≤0.125%): Continuous (~5 req/sec)
+  - High (0.125-0.25%): Every 2-3 seconds
+  - Normal (>0.25%): Every 30 seconds
+- Dynamic discovery scans for new addresses (frequency based on API pressure)
+- Two daily summaries at 7am and 4pm EST
+- No intraday "new position" alerts - quiet backend updates
 """
 
-import csv
 import logging
 import signal
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import pytz
 import requests
 
 from src.models import WatchedPosition
+from src.pipeline import (
+    fetch_cohorts,
+    save_cohort_csv,
+    fetch_all_mark_prices_async,
+    fetch_all_positions_async,
+    fetch_all_positions_for_address,
+    ALL_COHORTS,
+    ALL_DEXES,
+)
+from src.pipeline.step3_filter import calculate_distance_to_liquidation
+from src.utils.prices import get_current_price
 from .alerts import TelegramAlerts, AlertConfig
 from .database import MonitorDatabase
-from .scan_phase import run_scan_phase
-from .monitor_phase import run_monitor_phase
+from .cache import (
+    CachedPosition,
+    PositionCache,
+    TieredRefreshScheduler,
+    DiscoveryScheduler,
+    classify_tier,
+)
 from config.monitor_settings import (
-    SCAN_INTERVAL_MINUTES,
     POLL_INTERVAL_SECONDS,
-    POSITION_CACHE_MAX_AGE_MINUTES,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
-    DEFAULT_SCAN_MODE,
-    COMPREHENSIVE_SCAN_HOUR,
-    COMPREHENSIVE_SCAN_MINUTE,
+    CACHE_TIER_CRITICAL_PCT,
+    CACHE_TIER_HIGH_PCT,
+    CACHE_REFRESH_CRITICAL_SEC,
+    CACHE_REFRESH_HIGH_SEC,
+    CACHE_REFRESH_NORMAL_SEC,
+    CACHE_MAX_AGE_MINUTES,
+    CACHE_PRUNE_AGE_HOURS,
+    DISCOVERY_MIN_INTERVAL_MINUTES,
+    DISCOVERY_MAX_INTERVAL_MINUTES,
+    DISCOVERY_PRESSURE_CRITICAL_WEIGHT,
+    DISCOVERY_PRESSURE_HIGH_WEIGHT,
+    DAILY_SUMMARY_TIMES,
+    CRITICAL_ZONE_PCT,
+    CRITICAL_ALERT_PCT,
+    RECOVERY_PCT,
+    COHORT_DATA_PATH,
+    get_watchlist_threshold,
 )
 
 # Timezone for scheduling
@@ -51,34 +80,27 @@ class MonitorService:
     """
     Continuous monitoring service for liquidation hunting.
 
-    Alternates between:
-    - Scan phase: Full pipeline (cohort -> position -> filter -> detect new)
-    - Monitor phase: Poll prices and alert on proximity threshold breach
+    Uses cache-based architecture with tiered refresh:
+    - Initial comprehensive scan to populate cache
+    - Continuous tiered refresh based on liquidation distance
+    - Dynamic discovery for new positions
+    - Two daily summaries at 7am and 4pm EST
     """
 
     def __init__(
         self,
-        scan_interval_minutes: int = SCAN_INTERVAL_MINUTES,
         poll_interval_seconds: int = POLL_INTERVAL_SECONDS,
-        scan_mode: str = DEFAULT_SCAN_MODE,
         dry_run: bool = False,
-        manual_mode: bool = False,
     ):
         """
         Initialize the monitor service.
 
         Args:
-            scan_interval_minutes: Time between full scans (manual mode only)
-            poll_interval_seconds: Time between price polls during monitor phase
-            scan_mode: Position scan mode for manual mode ("high-priority", "normal", "comprehensive")
+            poll_interval_seconds: Time between price polls
             dry_run: If True, print alerts instead of sending to Telegram
-            manual_mode: If True, use fixed interval; if False, use time-based scheduling
         """
-        self.scan_interval = scan_interval_minutes * 60  # Convert to seconds
         self.poll_interval = poll_interval_seconds
-        self.scan_mode = scan_mode  # Used in manual mode or as default
         self.dry_run = dry_run
-        self.manual_mode = manual_mode
 
         # Initialize alert system
         self.alerts = TelegramAlerts(AlertConfig(
@@ -90,14 +112,34 @@ class MonitorService:
         # Initialize database
         self.db = MonitorDatabase()
 
+        # Initialize cache components
+        self.position_cache = PositionCache(self.db)
+        self.refresh_scheduler = TieredRefreshScheduler(
+            self.position_cache,
+            critical_interval=CACHE_REFRESH_CRITICAL_SEC,
+            high_interval=CACHE_REFRESH_HIGH_SEC,
+            normal_interval=CACHE_REFRESH_NORMAL_SEC,
+        )
+        self.discovery_scheduler = DiscoveryScheduler(
+            self.position_cache,
+            self.db,
+            min_interval_minutes=DISCOVERY_MIN_INTERVAL_MINUTES,
+            max_interval_minutes=DISCOVERY_MAX_INTERVAL_MINUTES,
+            critical_weight=DISCOVERY_PRESSURE_CRITICAL_WEIGHT,
+            high_weight=DISCOVERY_PRESSURE_HIGH_WEIGHT,
+        )
+
         # State tracking
-        self.watchlist: Dict[str, WatchedPosition] = {}  # position_key -> WatchedPosition
-        self.previous_position_keys: Set[str] = set()  # Keys from previous scan
-        self.baseline_position_keys: Set[str] = set()  # Keys from baseline (comprehensive) scan
         self.running = False
-        self.last_scan_time: Optional[datetime] = None
-        self._last_snapshot_time: float = 0  # For throttling position snapshots
-        self._last_prune_time: float = 0  # For periodic data pruning
+        self._last_snapshot_time: float = 0
+        self._last_prune_time: float = 0
+
+        # Daily summary tracking
+        self._last_summary_date: Optional[date] = None
+        self._summaries_sent_today: Set[Tuple[int, int]] = set()
+
+        # Alert tracking for proximity alerts
+        self._alerted_positions: Dict[str, dict] = {}  # position_key -> alert state
 
         # Signal handling for graceful shutdown
         signal.signal(signal.SIGINT, self._handle_shutdown)
@@ -107,75 +149,423 @@ class MonitorService:
         """Handle shutdown signals gracefully."""
         logger.info("Shutdown signal received, stopping monitor...")
         self.running = False
-        # Save state before shutdown
-        self._save_state()
 
-    def _restore_state(self) -> bool:
+    def _restore_from_cache(self) -> bool:
         """
-        Restore watchlist and baseline from database.
+        Restore state from position cache on startup.
 
         Returns:
-            True if state was restored (had saved data), False otherwise
+            True if cache was valid and loaded, False if initial scan needed
         """
         try:
-            # Load baseline
-            self.baseline_position_keys = self.db.load_baseline()
-
-            # Load watchlist
-            saved_positions = self.db.load_watchlist()
-            if not saved_positions:
-                logger.info("No saved watchlist found, starting fresh")
+            # Load position cache
+            loaded = self.position_cache.load_from_db()
+            if loaded == 0:
+                logger.info("No cached positions found, initial scan required")
                 return False
 
-            # Reconstruct WatchedPosition objects
-            for pos_data in saved_positions:
-                watched = WatchedPosition(
-                    address=pos_data['address'],
-                    token=pos_data['token'],
-                    exchange=pos_data['exchange'],
-                    side=pos_data['side'],
-                    liq_price=pos_data['liq_price'],
-                    position_value=pos_data['position_value'],
-                    is_isolated=pos_data['is_isolated'],
-                    hunting_score=pos_data['hunting_score'],
-                    last_distance_pct=pos_data['last_distance_pct'],
-                    last_mark_price=pos_data['last_mark_price'],
-                    threshold_pct=pos_data['threshold_pct'],
-                    alerted_proximity=pos_data['alerted_proximity'],
-                    alerted_critical=pos_data['alerted_critical'],
-                    in_critical_zone=pos_data['in_critical_zone'],
-                    first_seen_scan=pos_data['first_seen_scan'],
-                    alert_message_id=pos_data['alert_message_id'],
-                    last_proximity_message_id=pos_data['last_proximity_message_id'],
-                )
-                self.watchlist[watched.position_key] = watched
+            # Check cache freshness
+            oldest_refresh = self.position_cache.get_oldest_refresh()
+            if oldest_refresh is None:
+                logger.info("No refresh timestamps in cache, initial scan required")
+                return False
 
-            self.previous_position_keys = set(self.watchlist.keys())
+            age_minutes = (datetime.now(timezone.utc) - oldest_refresh).total_seconds() / 60
+            if age_minutes > CACHE_MAX_AGE_MINUTES:
+                logger.info(f"Cache too old ({age_minutes:.1f} min > {CACHE_MAX_AGE_MINUTES} min), initial scan required")
+                return False
+
+            # Load known addresses
+            self.discovery_scheduler.load_known_addresses()
+            self.discovery_scheduler.restore_last_discovery()
+
+            # Load alert state
+            self._restore_alert_state()
 
             logger.info(
-                f"Restored state: {len(self.watchlist)} watchlist, "
-                f"{len(self.baseline_position_keys)} baseline"
+                f"Restored from cache: {loaded} positions, "
+                f"cache age: {age_minutes:.1f} min"
             )
             return True
 
         except Exception as e:
-            logger.warning(f"Failed to restore state: {e}, starting fresh")
+            logger.warning(f"Failed to restore from cache: {e}, initial scan required")
             return False
 
-    def _save_state(self):
-        """Save watchlist and baseline to database."""
+    def _restore_alert_state(self):
+        """Restore proximity alert state from database."""
+        # Load from service_state
+        for pos in self.position_cache.positions.values():
+            self._alerted_positions[pos.position_key] = {
+                'alerted_proximity': False,
+                'alerted_critical': False,
+                'in_critical_zone': False,
+            }
+
+    def _run_initial_scan(self):
+        """
+        One-time comprehensive scan to populate position cache.
+
+        Scans all cohorts across all exchanges.
+        """
+        logger.info("=" * 60)
+        logger.info("INITIAL COMPREHENSIVE SCAN STARTING")
+        logger.info("=" * 60)
+
+        scan_start = datetime.now(timezone.utc)
+
+        # Step 1: Fetch all cohorts
+        logger.info("Step 1: Fetching cohort data...")
         try:
-            self.db.save_watchlist(self.watchlist)
-            self.db.save_baseline(self.baseline_position_keys)
-            logger.debug("State saved to database")
+            traders = fetch_cohorts(ALL_COHORTS, delay=1.0)
+            save_cohort_csv(traders, COHORT_DATA_PATH)
+            logger.info(f"Fetched {len(traders)} traders from {len(ALL_COHORTS)} cohorts")
         except Exception as e:
-            logger.error(f"Failed to save state: {e}")
+            logger.error(f"Cohort fetch error: {e}")
+            raise
+
+        # Build address list with cohorts
+        addresses = [(t.address, t.cohort) for t in traders]
+        unique_addresses = list(set(addresses))
+        logger.info(f"Unique addresses to scan: {len(unique_addresses)}")
+
+        # Step 2: Fetch mark prices
+        logger.info("Step 2: Fetching mark prices from all exchanges...")
+        try:
+            mark_prices = fetch_all_mark_prices_async(ALL_DEXES)
+            logger.info(f"Fetched {len(mark_prices)} prices")
+        except Exception as e:
+            logger.error(f"Price fetch error: {e}")
+            raise
+
+        # Step 3: Fetch positions for all addresses
+        logger.info("Step 3: Fetching positions (this may take several minutes)...")
+        try:
+            positions = fetch_all_positions_async(unique_addresses, mark_prices, dexes=ALL_DEXES)
+            logger.info(f"Fetched {len(positions)} positions")
+        except Exception as e:
+            logger.error(f"Position fetch error: {e}")
+            raise
+
+        # Step 4: Populate cache
+        logger.info("Step 4: Populating position cache...")
+        cached_positions = []
+        for pos in positions:
+            # Get mark price for this position
+            token = pos.token
+            exchange = pos.exchange
+            price = get_current_price(token, exchange, mark_prices)
+
+            if price and price > 0:
+                cached = CachedPosition.from_position_dict(
+                    vars(pos) if hasattr(pos, '__dict__') else pos,
+                    pos.cohort,
+                    price
+                )
+                cached_positions.append(cached)
+
+        # Batch save to cache
+        self.position_cache.update_positions_batch(cached_positions)
+
+        # Step 5: Save known addresses
+        logger.info("Step 5: Recording known addresses...")
+        self.discovery_scheduler.known_addresses = {addr for addr, _ in unique_addresses}
+        self.db.save_known_addresses_batch(unique_addresses)
+
+        # Record scan time
+        self.db.set_last_scan_time(scan_start)
+
+        scan_duration = (datetime.now(timezone.utc) - scan_start).total_seconds()
+        tier_counts = self.position_cache.get_tier_counts()
+
+        logger.info("=" * 60)
+        logger.info(f"INITIAL SCAN COMPLETE ({scan_duration:.1f}s)")
+        logger.info(f"Cached positions: {len(self.position_cache.positions)}")
+        logger.info(f"  Critical (≤{CACHE_TIER_CRITICAL_PCT}%): {tier_counts['critical']}")
+        logger.info(f"  High ({CACHE_TIER_CRITICAL_PCT}-{CACHE_TIER_HIGH_PCT}%): {tier_counts['high']}")
+        logger.info(f"  Normal (>{CACHE_TIER_HIGH_PCT}%): {tier_counts['normal']}")
+        logger.info("=" * 60)
+
+        # Send startup notification
+        self.alerts.send_service_status(
+            "started",
+            f"Initial scan complete\n"
+            f"Positions: {len(self.position_cache.positions)}\n"
+            f"Critical: {tier_counts['critical']} | High: {tier_counts['high']} | Normal: {tier_counts['normal']}"
+        )
+
+    def _run_main_loop(self):
+        """
+        Continuous main loop with tiered refresh and dynamic discovery.
+
+        1. Check for daily summary
+        2. Fetch mark prices (single API call)
+        3. Update cache with new prices
+        4. Process tiered refresh queue
+        5. Check proximity alerts
+        6. Maybe run discovery
+        """
+        logger.info("Entering main monitoring loop...")
+
+        last_price_fetch = 0
+        price_fetch_interval = 1.0  # Fetch prices every second
+
+        while self.running:
+            try:
+                loop_start = time.time()
+
+                # 1. Check for daily summary
+                self._maybe_send_daily_summary()
+
+                # 2. Fetch mark prices (throttled)
+                if time.time() - last_price_fetch >= price_fetch_interval:
+                    try:
+                        mark_prices = fetch_all_mark_prices_async(ALL_DEXES)
+                        last_price_fetch = time.time()
+
+                        # 3. Update cache with new prices
+                        self.position_cache.update_prices(mark_prices)
+                    except Exception as e:
+                        logger.warning(f"Price fetch failed: {e}")
+                        mark_prices = {}
+
+                # 4. Process tiered refresh queue
+                self._process_refresh_queue(mark_prices if 'mark_prices' in dir() else {})
+
+                # 5. Check proximity alerts
+                self._check_proximity_alerts()
+
+                # 6. Maybe run discovery (if API budget allows)
+                if self.discovery_scheduler.should_run_discovery():
+                    self._run_discovery()
+
+                # 7. Periodic maintenance
+                self._record_position_snapshots()
+                self._maybe_prune_data()
+
+                # Short sleep for responsive critical refresh
+                elapsed = time.time() - loop_start
+                sleep_time = max(0.1, CACHE_REFRESH_CRITICAL_SEC - elapsed)
+                time.sleep(sleep_time)
+
+            except KeyboardInterrupt:
+                logger.info("Interrupted by user")
+                break
+            except Exception as e:
+                logger.error(f"Main loop error: {e}")
+                time.sleep(5)
+
+    def _process_refresh_queue(self, mark_prices: Dict[str, float]):
+        """Process tiered refresh queue, refreshing positions that need it."""
+        # Get positions needing refresh (up to 5 per cycle to stay within rate limits)
+        to_refresh = self.refresh_scheduler.get_positions_to_refresh(max_count=5)
+
+        if not to_refresh:
+            return
+
+        for position_key in to_refresh:
+            pos = self.position_cache.positions.get(position_key)
+            if not pos:
+                continue
+
+            try:
+                # Fetch fresh position data
+                dexes = [""] if pos.exchange == "main" else [pos.exchange]
+                fresh_positions = fetch_all_positions_for_address(
+                    pos.address,
+                    mark_prices,
+                    dexes=dexes
+                )
+
+                # Find matching position
+                for fresh_pos in fresh_positions:
+                    fresh_key = f"{fresh_pos.address}:{fresh_pos.token}:{fresh_pos.exchange}:{fresh_pos.side}"
+                    if fresh_key == position_key:
+                        # Update cached position
+                        price = get_current_price(fresh_pos.token, fresh_pos.exchange, mark_prices)
+                        if price and price > 0:
+                            # Update position data
+                            pos.size = fresh_pos.size
+                            pos.leverage = fresh_pos.leverage
+                            pos.leverage_type = fresh_pos.leverage_type
+                            pos.entry_price = fresh_pos.entry_price
+                            pos.position_value = fresh_pos.position_value
+                            pos.liq_price = fresh_pos.liquidation_price
+                            pos.margin_used = fresh_pos.margin_used
+                            pos.unrealized_pnl = fresh_pos.unrealized_pnl
+                            pos.update_price(price)
+                            pos.last_full_refresh = datetime.now(timezone.utc)
+
+                            # Persist update
+                            self.position_cache.update_position(pos)
+                        break
+                else:
+                    # Position not found - might be closed
+                    logger.debug(f"Position {position_key} not found in refresh, may be closed")
+
+                self.refresh_scheduler.mark_refreshed(position_key)
+
+            except Exception as e:
+                logger.warning(f"Failed to refresh {position_key}: {e}")
+                self.refresh_scheduler.mark_refreshed(position_key)  # Mark to avoid immediate retry
+
+    def _check_proximity_alerts(self):
+        """Check positions for proximity alerts and send notifications."""
+        for key, pos in self.position_cache.positions.items():
+            if pos.distance_pct is None or pos.liq_price is None:
+                continue
+
+            # Check watchlist threshold
+            threshold = get_watchlist_threshold(
+                pos.token,
+                pos.exchange,
+                pos.leverage_type == 'isolated'
+            )
+            if pos.position_value < threshold:
+                continue
+
+            alert_state = self._alerted_positions.get(key, {
+                'alerted_proximity': False,
+                'alerted_critical': False,
+                'in_critical_zone': False,
+            })
+
+            distance = pos.distance_pct
+            was_critical = alert_state.get('in_critical_zone', False)
+
+            # Recovery alert: was critical, now > RECOVERY_PCT
+            if was_critical and distance > RECOVERY_PCT:
+                logger.info(f"RECOVERY: {pos.token} {pos.side} recovered to {distance:.3f}%")
+                self.alerts.send_recovery_alert_simple(
+                    token=pos.token,
+                    side=pos.side,
+                    address=pos.address,
+                    distance_pct=distance,
+                    liq_price=pos.liq_price,
+                    mark_price=pos.mark_price,
+                    position_value=pos.position_value,
+                    is_isolated=(pos.leverage_type == 'isolated'),
+                )
+                alert_state['alerted_proximity'] = False
+                alert_state['alerted_critical'] = False
+                alert_state['in_critical_zone'] = False
+
+            # Critical alert: crossed below CRITICAL_ALERT_PCT
+            elif distance <= CRITICAL_ALERT_PCT and not alert_state.get('alerted_critical', False):
+                logger.warning(f"CRITICAL: {pos.token} {pos.side} at {distance:.3f}%")
+                self.alerts.send_critical_alert_simple(
+                    token=pos.token,
+                    side=pos.side,
+                    address=pos.address,
+                    distance_pct=distance,
+                    liq_price=pos.liq_price,
+                    mark_price=pos.mark_price,
+                    position_value=pos.position_value,
+                    is_isolated=(pos.leverage_type == 'isolated'),
+                )
+                alert_state['alerted_critical'] = True
+                alert_state['in_critical_zone'] = True
+
+            # Proximity alert: crossed below CRITICAL_ZONE_PCT
+            elif distance <= CRITICAL_ZONE_PCT and not alert_state.get('alerted_proximity', False):
+                logger.info(f"PROXIMITY: {pos.token} {pos.side} at {distance:.3f}%")
+                self.alerts.send_proximity_alert_simple(
+                    token=pos.token,
+                    side=pos.side,
+                    address=pos.address,
+                    distance_pct=distance,
+                    liq_price=pos.liq_price,
+                    mark_price=pos.mark_price,
+                    position_value=pos.position_value,
+                    is_isolated=(pos.leverage_type == 'isolated'),
+                )
+                alert_state['alerted_proximity'] = True
+                alert_state['in_critical_zone'] = True
+
+            # Update critical zone tracking
+            alert_state['in_critical_zone'] = distance <= CRITICAL_ZONE_PCT
+
+            self._alerted_positions[key] = alert_state
+
+    def _run_discovery(self):
+        """Run discovery scan to find new addresses/positions."""
+        logger.info("Running discovery scan...")
+
+        try:
+            # Fetch current cohorts
+            traders = fetch_cohorts(ALL_COHORTS, delay=1.0)
+            current_addresses = [(t.address, t.cohort) for t in traders]
+
+            # Find new addresses
+            new_addresses = self.discovery_scheduler.find_new_addresses(current_addresses)
+
+            if not new_addresses:
+                logger.info("Discovery complete: no new addresses found")
+                self.discovery_scheduler.mark_discovery_complete([])
+                return
+
+            logger.info(f"Discovery: found {len(new_addresses)} new addresses")
+
+            # Fetch positions for new addresses
+            mark_prices = fetch_all_mark_prices_async(ALL_DEXES)
+            positions = fetch_all_positions_async(new_addresses, mark_prices, dexes=ALL_DEXES)
+
+            # Add to cache
+            for pos in positions:
+                token = pos.token
+                exchange = pos.exchange
+                price = get_current_price(token, exchange, mark_prices)
+
+                if price and price > 0:
+                    cached = CachedPosition.from_position_dict(
+                        vars(pos) if hasattr(pos, '__dict__') else pos,
+                        pos.cohort,
+                        price
+                    )
+                    self.position_cache.update_position(cached)
+
+            # Mark discovery complete
+            self.discovery_scheduler.mark_discovery_complete(new_addresses)
+
+            logger.info(f"Discovery complete: added {len(positions)} positions from {len(new_addresses)} new addresses")
+
+        except Exception as e:
+            logger.error(f"Discovery scan failed: {e}")
+            # Still mark discovery complete to avoid immediate retry
+            self.discovery_scheduler.mark_discovery_complete([])
+
+    def _maybe_send_daily_summary(self):
+        """Send daily summary at configured times (7am and 4pm EST)."""
+        now = datetime.now(EST)
+        today = now.date()
+
+        # Reset tracking on new day
+        if self._last_summary_date != today:
+            self._summaries_sent_today = set()
+            self._last_summary_date = today
+
+        for hour, minute in DAILY_SUMMARY_TIMES:
+            summary_key = (hour, minute)
+            if summary_key in self._summaries_sent_today:
+                continue
+
+            # Check if we're past the summary time
+            summary_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if now >= summary_time:
+                self._send_daily_summary()
+                self._summaries_sent_today.add(summary_key)
+                logger.info(f"Sent daily summary for {hour:02d}:{minute:02d} EST")
+
+    def _send_daily_summary(self):
+        """Send the daily watchlist summary to Telegram."""
+        from .alerts import send_daily_summary
+        send_daily_summary(self.position_cache, self.alerts, self.discovery_scheduler)
 
     def _record_position_snapshots(self):
         """Record position snapshots for history tracking (throttled)."""
         now = time.time()
 
-        # Only snapshot every 5 minutes to avoid excessive writes
+        # Only snapshot every 5 minutes
         if now - self._last_snapshot_time < 300:
             return
 
@@ -183,13 +573,13 @@ class MonitorService:
             snapshots = [
                 {
                     'position_key': pos.position_key,
-                    'liq_price': pos.liq_price,
+                    'liq_price': pos.liq_price or 0,
                     'position_value': pos.position_value,
-                    'distance_pct': pos.last_distance_pct,
-                    'mark_price': pos.last_mark_price,
+                    'distance_pct': pos.distance_pct or 0,
+                    'mark_price': pos.mark_price,
                 }
-                for pos in self.watchlist.values()
-                if pos.last_distance_pct is not None and pos.last_mark_price is not None
+                for pos in self.position_cache.positions.values()
+                if pos.distance_pct is not None and pos.liq_price is not None
             ]
 
             if snapshots:
@@ -204,319 +594,68 @@ class MonitorService:
         """Periodically prune old data (once per day)."""
         now = time.time()
 
-        # Prune once per day (86400 seconds)
+        # Prune once per day
         if now - self._last_prune_time < 86400:
             return
 
         try:
+            # Prune database tables
             self.db.prune_old_data()
+
+            # Prune stale cached positions
+            self.db.delete_stale_positions(CACHE_PRUNE_AGE_HOURS)
+
+            # Clean up refresh scheduler
+            self.refresh_scheduler.clear_stale_entries()
+
             self._last_prune_time = now
+
         except Exception as e:
             logger.warning(f"Failed to prune old data: {e}")
-
-    def _get_scan_mode_for_time(self, dt: datetime) -> str:
-        """
-        Determine the scan mode for a given time.
-
-        Schedule (all times in EST):
-        - 6:30 AM -> "comprehensive" (baseline scan)
-        - :00 (on the hour) -> "normal"
-        - :30 (half hour) -> "high-priority"
-
-        Args:
-            dt: Datetime to check (will be converted to EST)
-
-        Returns:
-            Scan mode string: "comprehensive", "normal", or "high-priority"
-        """
-        # Convert to EST
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        est_time = dt.astimezone(EST)
-
-        hour = est_time.hour
-        minute = est_time.minute
-
-        # Check for comprehensive scan time (6:30 AM EST)
-        if hour == COMPREHENSIVE_SCAN_HOUR and minute == COMPREHENSIVE_SCAN_MINUTE:
-            return "comprehensive"
-
-        # On the hour (:00) -> normal scan
-        if minute < 15:
-            return "normal"
-
-        # Half hour (:30) -> priority scan
-        return "high-priority"
-
-    def _get_next_scan_time(self) -> datetime:
-        """
-        Get the next scheduled scan time.
-
-        Returns the next :00 or :30 time slot in UTC.
-
-        Returns:
-            datetime in UTC for the next scan
-        """
-        now_utc = datetime.now(timezone.utc)
-        now_est = now_utc.astimezone(EST)
-
-        # Current minute determines next slot
-        current_minute = now_est.minute
-
-        if current_minute < 30:
-            # Next slot is :30
-            next_minute = 30
-            next_hour = now_est.hour
-        else:
-            # Next slot is :00 of next hour
-            next_minute = 0
-            next_hour = now_est.hour + 1
-
-        # Create next scan time in EST
-        next_scan_est = now_est.replace(
-            hour=next_hour % 24,
-            minute=next_minute,
-            second=0,
-            microsecond=0
-        )
-
-        # Handle day rollover
-        if next_hour >= 24:
-            next_scan_est = next_scan_est + timedelta(days=1)
-            next_scan_est = next_scan_est.replace(hour=next_hour % 24)
-
-        # Convert back to UTC
-        return next_scan_est.astimezone(timezone.utc)
-
-    def _get_cached_position_file_age(self, filepath: str) -> Optional[float]:
-        """
-        Get the age of a cached position file in minutes.
-
-        Args:
-            filepath: Path to the position file
-
-        Returns:
-            Age in minutes, or None if file doesn't exist
-        """
-        try:
-            path = Path(filepath)
-            if not path.exists():
-                return None
-            mtime = path.stat().st_mtime
-            age_seconds = time.time() - mtime
-            return age_seconds / 60
-        except OSError:
-            return None
-
-    def _can_use_cached_positions(self, filepath: str) -> bool:
-        """
-        Check if cached position data is fresh enough to use as fallback.
-
-        Args:
-            filepath: Path to the position file
-
-        Returns:
-            True if cache is valid and fresh enough
-        """
-        age_minutes = self._get_cached_position_file_age(filepath)
-        if age_minutes is None:
-            return False
-        return age_minutes <= POSITION_CACHE_MAX_AGE_MINUTES
-
-    def run_scan_phase(
-        self,
-        mode: Optional[str] = None,
-        is_baseline: bool = False,
-        notify_cohorts: bool = False,
-        send_summary: bool = False
-    ) -> Tuple[int, int]:
-        """
-        Execute the scan phase of the monitor loop.
-
-        Delegates to scan_phase module.
-        """
-        return run_scan_phase(self, mode, is_baseline, notify_cohorts, send_summary)
-
-    def run_monitor_phase(self, until: Optional[datetime] = None):
-        """
-        Execute the monitor phase - poll prices until specified time or next scan.
-
-        Delegates to monitor_phase module.
-        """
-        run_monitor_phase(self, until)
-
-    def _run_manual_mode(self):
-        """
-        Run in manual mode with fixed interval between scans.
-
-        Original behavior: scan, monitor for interval, repeat.
-        """
-        logger.info(f"Mode: MANUAL (fixed {self.scan_interval // 60}min interval)")
-        logger.info(f"Scan mode: {self.scan_mode}")
-
-        # Send startup notification
-        self.alerts.send_service_status(
-            "started",
-            f"Manual mode | Interval: {self.scan_interval // 60}min | Mode: {self.scan_mode}"
-        )
-
-        while self.running:
-            # Scan phase (always baseline in manual mode)
-            total, new_count = self.run_scan_phase(is_baseline=True)
-
-            if not self.running:
-                break
-
-            if total == 0:
-                logger.warning("No positions to watch, waiting 60s before retry...")
-                time.sleep(60)
-                continue
-
-            # Monitor phase
-            self.run_monitor_phase()
-
-    def _run_scheduled_mode(self):
-        """
-        Run in scheduled mode with time-based scan scheduling.
-
-        Schedule (all times EST):
-        - 6:30 AM: Comprehensive scan (baseline reset)
-        - Every hour (:00): Normal scan
-        - Every 30 min (:30): Priority scan
-
-        On startup: always runs progressive scan with rate limit protection.
-        """
-        now = datetime.now(timezone.utc)
-        now_est = now.astimezone(EST)
-        logger.info(f"Mode: SCHEDULED (time-based)")
-        logger.info(f"Current time: {now_est.strftime('%H:%M EST')}")
-        logger.info(f"Comprehensive scan at: {COMPREHENSIVE_SCAN_HOUR:02d}:{COMPREHENSIVE_SCAN_MINUTE:02d} EST")
-
-        # Rate limit protection: check if last scan was too recent
-        SCAN_COOLDOWN_MINUTES = 5
-        last_scan = self.db.get_last_scan_time()
-        if last_scan:
-            elapsed = (now - last_scan).total_seconds()
-            cooldown_seconds = SCAN_COOLDOWN_MINUTES * 60
-            if elapsed < cooldown_seconds:
-                wait_seconds = int(cooldown_seconds - elapsed)
-                logger.info(
-                    f"Rate limit protection: last scan was {elapsed:.0f}s ago, "
-                    f"waiting {wait_seconds}s before starting"
-                )
-                restart_time = now + timedelta(seconds=wait_seconds)
-                restart_time_et = restart_time.astimezone(pytz.timezone("America/New_York"))
-                self.alerts.send_service_status(
-                    "started",
-                    f"Not monitoring positions (rate limit cooldown)\n"
-                    f"Estimated restart: {restart_time_et.strftime('%H:%M:%S %Z')}"
-                )
-                time.sleep(wait_seconds)
-
-        # Always do progressive startup scan
-        logger.info("Starting progressive scan")
-
-        # Send startup notification
-        self.alerts.send_service_status(
-            "started",
-            "Scheduled mode | Progressive startup scan"
-        )
-
-        # Progressive startup scan: incremental additions only (no re-scanning)
-        # Phase 1: kraken + large_whale (main, xyz)
-        # Phase 2: whale only (main, xyz) - incremental
-        # Phase 3: shark only + remaining exchanges - incremental
-        logger.info("=" * 60)
-        logger.info("PROGRESSIVE STARTUP SCAN (incremental)")
-        logger.info("=" * 60)
-
-        # Phase 1: High-priority (kraken + large_whale, main + xyz)
-        logger.info("Phase 1/3: High-priority scan (largest traders, main exchanges)")
-        total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True, notify_cohorts=False, send_summary=True)
-
-        if not self.running:
-            return
-
-        # Phase 2: Whale only (incremental - not re-scanning kraken/large_whale)
-        logger.info("Phase 2/3: Whale scan (incremental)")
-        total, new_count = self.run_scan_phase(mode="whale-only", is_baseline=False, notify_cohorts=False, send_summary=True)
-
-        if not self.running:
-            return
-
-        # Phase 3: Shark + remaining exchanges (incremental)
-        logger.info("Phase 3/3: Shark + additional exchanges (incremental)")
-        total, new_count = self.run_scan_phase(mode="shark-incremental", is_baseline=False, notify_cohorts=False, send_summary=True)
-
-        if not self.running:
-            return
-
-        # Set final baseline from comprehensive scan
-        self.baseline_position_keys = set(self.watchlist.keys())
-        logger.info(f"Progressive scan complete. Final baseline: {len(self.baseline_position_keys)} positions")
-
-        if total == 0:
-            logger.warning("No positions from startup scan, waiting 60s before retry...")
-            time.sleep(60)
-
-        # Enter main scheduled loop
-        self._run_scheduled_main_loop()
-
-    def _run_scheduled_main_loop(self):
-        """
-        Main scheduled loop - runs after startup (fresh or restored).
-
-        Alternates between monitor phase and scheduled scans.
-        """
-        while self.running:
-            # Get next scan time and mode
-            next_scan_time = self._get_next_scan_time()
-            next_scan_mode = self._get_scan_mode_for_time(next_scan_time)
-            is_baseline = (next_scan_mode == "comprehensive")
-
-            next_est = next_scan_time.astimezone(EST)
-            logger.info(
-                f"Next scan at {next_est.strftime('%H:%M EST')}: "
-                f"mode={next_scan_mode}" + (" (baseline)" if is_baseline else "")
-            )
-
-            # Monitor phase until next scan time
-            self.run_monitor_phase(until=next_scan_time)
-
-            if not self.running:
-                break
-
-            # Run the scheduled scan
-            total, new_count = self.run_scan_phase(mode=next_scan_mode, is_baseline=is_baseline)
-
-            if total == 0:
-                logger.warning("No positions to watch, waiting 60s before retry...")
-                time.sleep(60)
 
     def run(self):
         """
         Main entry point - run the continuous monitor loop.
 
-        In scheduled mode (default):
-        - 6:30 AM EST: Comprehensive scan (baseline)
-        - Every hour (:00): Normal scan
-        - Every 30 min (:30): Priority scan
-
-        In manual mode (--manual flag):
-        - Fixed interval between scans (original behavior)
+        1. Try to restore from cache
+        2. If cache invalid, run initial comprehensive scan
+        3. Enter main monitoring loop with tiered refresh
         """
         self.running = True
         logger.info("=" * 60)
         logger.info("LIQUIDATION MONITOR SERVICE STARTING")
         logger.info("=" * 60)
-        logger.info(f"Poll interval: {self.poll_interval} seconds")
+        logger.info(f"Mode: Cache-based with tiered refresh")
+        logger.info(f"Tiers: Critical ≤{CACHE_TIER_CRITICAL_PCT}%, High ≤{CACHE_TIER_HIGH_PCT}%")
+        logger.info(f"Daily summaries at: {', '.join(f'{h:02d}:{m:02d} EST' for h, m in DAILY_SUMMARY_TIMES)}")
         logger.info(f"Dry run: {self.dry_run}")
 
         try:
-            if self.manual_mode:
-                self._run_manual_mode()
+            # Try to restore from cache
+            if not self._restore_from_cache():
+                # Run initial scan
+                self._run_initial_scan()
             else:
-                self._run_scheduled_mode()
+                # Refresh prices immediately after restore
+                logger.info("Refreshing prices after cache restore...")
+                try:
+                    mark_prices = fetch_all_mark_prices_async(ALL_DEXES)
+                    self.position_cache.update_prices(mark_prices)
+                    logger.info("Prices refreshed, cache up to date")
+                except Exception as e:
+                    logger.warning(f"Price refresh failed: {e}")
+
+                # Send startup notification
+                tier_counts = self.position_cache.get_tier_counts()
+                self.alerts.send_service_status(
+                    "started",
+                    f"Restored from cache\n"
+                    f"Positions: {len(self.position_cache.positions)}\n"
+                    f"Critical: {tier_counts['critical']} | High: {tier_counts['high']} | Normal: {tier_counts['normal']}"
+                )
+
+            # Enter main loop
+            self._run_main_loop()
 
         except KeyboardInterrupt:
             logger.info("Service interrupted by user")
@@ -525,18 +664,11 @@ class MonitorService:
             logger.error(f"Service error: {error_msg}")
             self.alerts.send_service_status("error", error_msg)
             raise
-        except (OSError, csv.Error) as e:
-            error_msg = f"File error: {type(e).__name__}"
-            logger.error(f"Service error: {error_msg}")
-            self.alerts.send_service_status("error", error_msg)
-            raise
         except Exception as e:
-            # Catch-all for unexpected errors - log type only to avoid exposing sensitive data
             error_msg = f"Unexpected error: {type(e).__name__}"
             logger.error(f"Service error: {error_msg}")
             self.alerts.send_service_status("error", error_msg)
             raise
-
         finally:
             logger.info("LIQUIDATION MONITOR SERVICE STOPPED")
             self.alerts.send_service_status("stopped")

@@ -888,6 +888,220 @@ class TelegramAlerts:
         message = "\n".join(lines)
         return self._send_message(message, skip_rate_limit=True)
 
+    def send_proximity_alert_simple(
+        self,
+        token: str,
+        side: str,
+        address: str,
+        distance_pct: float,
+        liq_price: float,
+        mark_price: float,
+        position_value: float,
+        is_isolated: bool = False,
+        alert_time: datetime = None
+    ) -> Optional[int]:
+        """
+        Send proximity alert with simple parameters (for cache-based monitoring).
+
+        Args:
+            token: Token symbol
+            side: "Long" or "Short"
+            address: Wallet address
+            distance_pct: Current distance to liquidation
+            liq_price: Liquidation price
+            mark_price: Current mark price
+            position_value: Position value in USD
+            is_isolated: Whether isolated margin
+            alert_time: Alert timestamp
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        position_key = f"{address}:{token}:main:{side}"
+        if not self._can_alert_position(position_key):
+            logger.debug(f"Proximity alert for {token} skipped (cooldown)")
+            return None
+
+        if alert_time is None:
+            alert_time = datetime.now(timezone.utc)
+
+        alert_time_et = alert_time.astimezone(EASTERN_TZ)
+
+        side_str = "L" if side == "Long" else "S"
+        margin_type = "Iso" if is_isolated else "Cross"
+
+        if position_value >= 1_000_000:
+            value_str = f"${position_value / 1_000_000:.1f}M"
+        else:
+            value_str = f"${position_value / 1_000:.0f}K"
+
+        def format_price(p: float) -> str:
+            if p >= 1000:
+                return f"${p:,.0f}"
+            elif p >= 1:
+                return f"${p:.2f}"
+            else:
+                return f"${p:.6f}"
+
+        hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+        addr_display = f"{address[:6]}...{address[-4:]}"
+
+        lines = [
+            "APPROACHING LIQUIDATION",
+            "",
+            f"{token} | {side_str} | {value_str} | {margin_type}",
+            f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            "",
+            f"Liquidation Distance: <b>{distance_pct:.2f}%</b>",
+            f"Liq. Price: {format_price(liq_price)} | Current: {format_price(mark_price)}",
+            "",
+            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
+        ]
+
+        message = "\n".join(lines)
+        message_id = self._send_message(message)
+
+        if message_id is not None:
+            self._record_position_alert(position_key)
+
+        return message_id
+
+    def send_critical_alert_simple(
+        self,
+        token: str,
+        side: str,
+        address: str,
+        distance_pct: float,
+        liq_price: float,
+        mark_price: float,
+        position_value: float,
+        is_isolated: bool = False,
+        alert_time: datetime = None
+    ) -> Optional[int]:
+        """
+        Send critical alert with simple parameters (for cache-based monitoring).
+
+        Args:
+            token: Token symbol
+            side: "Long" or "Short"
+            address: Wallet address
+            distance_pct: Current distance to liquidation
+            liq_price: Liquidation price
+            mark_price: Current mark price
+            position_value: Position value in USD
+            is_isolated: Whether isolated margin
+            alert_time: Alert timestamp
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        if alert_time is None:
+            alert_time = datetime.now(timezone.utc)
+
+        alert_time_et = alert_time.astimezone(EASTERN_TZ)
+
+        side_str = "L" if side == "Long" else "S"
+        margin_type = "Iso" if is_isolated else "Cross"
+
+        if position_value >= 1_000_000:
+            value_str = f"${position_value / 1_000_000:.1f}M"
+        else:
+            value_str = f"${position_value / 1_000:.0f}K"
+
+        def format_price(p: float) -> str:
+            if p >= 1000:
+                return f"${p:,.0f}"
+            elif p >= 1:
+                return f"${p:.2f}"
+            else:
+                return f"${p:.6f}"
+
+        hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+        addr_display = f"{address[:6]}...{address[-4:]}"
+
+        lines = [
+            "🚨 IMMINENT LIQUIDATION",
+            "",
+            f"{token} | {side_str} | {value_str} | {margin_type}",
+            f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            "",
+            f"Liquidation Distance: <b>{distance_pct:.3f}%</b>",
+            f"Liq. Price: {format_price(liq_price)} | Current: {format_price(mark_price)}",
+            "",
+            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
+        ]
+
+        message = "\n".join(lines)
+        return self._send_message(message, skip_rate_limit=True)
+
+    def send_recovery_alert_simple(
+        self,
+        token: str,
+        side: str,
+        address: str,
+        distance_pct: float,
+        liq_price: float,
+        mark_price: float,
+        position_value: float,
+        is_isolated: bool = False,
+        alert_time: datetime = None
+    ) -> Optional[int]:
+        """
+        Send recovery alert with simple parameters (for cache-based monitoring).
+
+        Args:
+            token: Token symbol
+            side: "Long" or "Short"
+            address: Wallet address
+            distance_pct: Current distance to liquidation
+            liq_price: Liquidation price
+            mark_price: Current mark price
+            position_value: Position value in USD
+            is_isolated: Whether isolated margin
+            alert_time: Alert timestamp
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        if alert_time is None:
+            alert_time = datetime.now(timezone.utc)
+
+        alert_time_et = alert_time.astimezone(EASTERN_TZ)
+
+        side_str = "L" if side == "Long" else "S"
+        margin_type = "Iso" if is_isolated else "Cross"
+
+        if position_value >= 1_000_000:
+            value_str = f"${position_value / 1_000_000:.1f}M"
+        else:
+            value_str = f"${position_value / 1_000:.0f}K"
+
+        def format_price(p: float) -> str:
+            if p >= 1000:
+                return f"${p:,.0f}"
+            elif p >= 1:
+                return f"${p:.2f}"
+            else:
+                return f"${p:.6f}"
+
+        hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+        addr_display = f"{address[:6]}...{address[-4:]}"
+
+        lines = [
+            "✅ POSITION RECOVERED",
+            "",
+            f"{token} | {side_str} | {value_str} | {margin_type}",
+            f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            "",
+            f"Liquidation Distance: <b>{distance_pct:.2f}%</b>",
+            f"Liq. Price: {format_price(liq_price)} | Current: {format_price(mark_price)}",
+            "",
+            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
+        ]
+
+        message = "\n".join(lines)
+        return self._send_message(message)
+
     def send_service_status(
         self,
         status: str,
@@ -932,6 +1146,104 @@ class TelegramAlerts:
         message = "\n".join(lines)
         # Service status alerts skip rate limiting (critical operational info)
         return self._send_message(message, skip_rate_limit=True) is not None
+
+
+def send_daily_summary(
+    position_cache: "PositionCache",
+    alerts: TelegramAlerts,
+    discovery_scheduler: "DiscoveryScheduler"
+) -> Optional[int]:
+    """
+    Send daily watchlist summary to Telegram.
+
+    Groups positions by refresh tier and shows overview of monitored positions.
+
+    Args:
+        position_cache: PositionCache with current positions
+        alerts: TelegramAlerts instance
+        discovery_scheduler: DiscoveryScheduler for discovery interval info
+
+    Returns:
+        message_id if sent successfully, None otherwise
+    """
+    from collections import defaultdict
+    from .cache import PositionCache, DiscoveryScheduler
+
+    now = datetime.now(EASTERN_TZ)
+
+    # Group positions by tier
+    positions_by_tier = {
+        'critical': [],
+        'high': [],
+        'normal': [],
+    }
+
+    for pos in position_cache.positions.values():
+        positions_by_tier[pos.refresh_tier].append(pos)
+
+    # Sort each tier by distance
+    for tier in positions_by_tier:
+        positions_by_tier[tier].sort(key=lambda p: p.distance_pct or float('inf'))
+
+    critical = positions_by_tier['critical']
+    high = positions_by_tier['high']
+    normal = positions_by_tier['normal']
+
+    # Build message
+    lines = [
+        "LIQUIDATION WATCHLIST SUMMARY",
+        f"{now.strftime('%Y-%m-%d %I:%M %p')} EST",
+        "",
+    ]
+
+    # Critical section
+    if critical:
+        lines.append(f"🔴 CRITICAL ZONE (≤0.125%): {len(critical)}")
+        for pos in critical[:10]:  # Limit to 10
+            value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
+            side_char = "L" if pos.side == "Long" else "S"
+            addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
+            lines.append(f"  • {pos.token} {side_char} {value_str} @ {pos.distance_pct:.3f}%")
+            lines.append(f"    {addr_short}")
+        if len(critical) > 10:
+            lines.append(f"  ... and {len(critical) - 10} more")
+        lines.append("")
+
+    # High section
+    if high:
+        lines.append(f"🟠 HIGH PRIORITY (0.125-0.25%): {len(high)}")
+        for pos in high[:10]:  # Limit to 10
+            value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
+            side_char = "L" if pos.side == "Long" else "S"
+            lines.append(f"  • {pos.token} {side_char} {value_str} @ {pos.distance_pct:.3f}%")
+        if len(high) > 10:
+            lines.append(f"  ... and {len(high) - 10} more")
+        lines.append("")
+
+    # Normal section - aggregate by token
+    if normal:
+        lines.append(f"🟢 MONITORING: {len(normal)} positions >0.25%")
+        token_summary = defaultdict(lambda: {"count": 0, "value": 0})
+        for pos in normal:
+            token_summary[pos.token]["count"] += 1
+            token_summary[pos.token]["value"] += pos.position_value
+
+        # Sort by total value, show top 10
+        sorted_tokens = sorted(token_summary.items(), key=lambda x: -x[1]["value"])[:10]
+        for token, data in sorted_tokens:
+            value_str = f"${data['value'] / 1_000_000:.1f}M" if data['value'] >= 1_000_000 else f"${data['value'] / 1_000:.0f}K"
+            lines.append(f"  • {token}: {data['count']} pos, {value_str}")
+        if len(token_summary) > 10:
+            lines.append(f"  ... and {len(token_summary) - 10} more tokens")
+        lines.append("")
+
+    # Footer
+    total = len(position_cache.positions)
+    discovery_interval = discovery_scheduler.get_discovery_interval_minutes()
+    lines.append(f"Cache: {total} total | Discovery interval: {discovery_interval}min")
+
+    message = "\n".join(lines)
+    return alerts._send_message(message)
 
 
 def send_test_alert(

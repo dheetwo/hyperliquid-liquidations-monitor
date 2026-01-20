@@ -221,6 +221,64 @@ class MonitorDatabase:
                 ON service_logs(level)
             """)
 
+            # Position cache: full position data with caching metadata
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS position_cache (
+                    position_key TEXT PRIMARY KEY,
+                    address TEXT NOT NULL,
+                    token TEXT NOT NULL,
+                    exchange TEXT NOT NULL,
+                    side TEXT NOT NULL,
+
+                    -- Position data
+                    size REAL NOT NULL,
+                    leverage REAL NOT NULL,
+                    leverage_type TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    position_value REAL NOT NULL,
+                    liq_price REAL,
+                    margin_used REAL NOT NULL,
+                    unrealized_pnl REAL NOT NULL,
+
+                    -- Computed fields
+                    mark_price REAL NOT NULL,
+                    distance_pct REAL,
+                    cohort TEXT NOT NULL,
+
+                    -- Caching metadata
+                    refresh_tier TEXT NOT NULL DEFAULT 'normal',
+                    last_full_refresh TEXT NOT NULL,
+                    last_price_update TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+
+                    -- Tracking
+                    hunting_score REAL,
+                    is_in_watchlist INTEGER DEFAULT 0
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_position_cache_tier
+                ON position_cache(refresh_tier)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_position_cache_distance
+                ON position_cache(distance_pct)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_position_cache_address
+                ON position_cache(address)
+            """)
+
+            # Known addresses: tracks discovered wallet addresses
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS known_addresses (
+                    address TEXT PRIMARY KEY,
+                    cohort TEXT NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_scanned TEXT NOT NULL
+                )
+            """)
+
     # =========================================================================
     # Watchlist Operations
     # =========================================================================
@@ -354,6 +412,411 @@ class MonitorDatabase:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM baseline_positions")
         logger.debug("Baseline cleared")
+
+    # =========================================================================
+    # Position Cache Operations
+    # =========================================================================
+
+    def save_cached_position(self, position: dict):
+        """
+        Save or update a single cached position.
+
+        Args:
+            position: Dict with all position fields
+        """
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO position_cache (
+                    position_key, address, token, exchange, side,
+                    size, leverage, leverage_type, entry_price, position_value,
+                    liq_price, margin_used, unrealized_pnl,
+                    mark_price, distance_pct, cohort,
+                    refresh_tier, last_full_refresh, last_price_update, created_at,
+                    hunting_score, is_in_watchlist
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                position['position_key'],
+                position['address'],
+                position['token'],
+                position['exchange'],
+                position['side'],
+                position['size'],
+                position['leverage'],
+                position['leverage_type'],
+                position['entry_price'],
+                position['position_value'],
+                position.get('liq_price'),
+                position['margin_used'],
+                position['unrealized_pnl'],
+                position['mark_price'],
+                position.get('distance_pct'),
+                position['cohort'],
+                position.get('refresh_tier', 'normal'),
+                position['last_full_refresh'],
+                position['last_price_update'],
+                position['created_at'],
+                position.get('hunting_score'),
+                int(position.get('is_in_watchlist', False)),
+            ))
+
+    def save_cached_positions_batch(self, positions: List[dict]):
+        """
+        Save multiple cached positions efficiently.
+
+        Args:
+            positions: List of position dicts
+        """
+        if not positions:
+            return
+
+        with self._get_connection() as conn:
+            conn.executemany("""
+                INSERT OR REPLACE INTO position_cache (
+                    position_key, address, token, exchange, side,
+                    size, leverage, leverage_type, entry_price, position_value,
+                    liq_price, margin_used, unrealized_pnl,
+                    mark_price, distance_pct, cohort,
+                    refresh_tier, last_full_refresh, last_price_update, created_at,
+                    hunting_score, is_in_watchlist
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                (
+                    p['position_key'],
+                    p['address'],
+                    p['token'],
+                    p['exchange'],
+                    p['side'],
+                    p['size'],
+                    p['leverage'],
+                    p['leverage_type'],
+                    p['entry_price'],
+                    p['position_value'],
+                    p.get('liq_price'),
+                    p['margin_used'],
+                    p['unrealized_pnl'],
+                    p['mark_price'],
+                    p.get('distance_pct'),
+                    p['cohort'],
+                    p.get('refresh_tier', 'normal'),
+                    p['last_full_refresh'],
+                    p['last_price_update'],
+                    p['created_at'],
+                    p.get('hunting_score'),
+                    int(p.get('is_in_watchlist', False)),
+                )
+                for p in positions
+            ])
+
+        logger.debug(f"Saved {len(positions)} cached positions")
+
+    def load_position_cache(self) -> List[dict]:
+        """
+        Load all cached positions from database.
+
+        Returns:
+            List of position dicts
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM position_cache")
+            rows = cursor.fetchall()
+
+        positions = []
+        for row in rows:
+            positions.append({
+                'position_key': row['position_key'],
+                'address': row['address'],
+                'token': row['token'],
+                'exchange': row['exchange'],
+                'side': row['side'],
+                'size': row['size'],
+                'leverage': row['leverage'],
+                'leverage_type': row['leverage_type'],
+                'entry_price': row['entry_price'],
+                'position_value': row['position_value'],
+                'liq_price': row['liq_price'],
+                'margin_used': row['margin_used'],
+                'unrealized_pnl': row['unrealized_pnl'],
+                'mark_price': row['mark_price'],
+                'distance_pct': row['distance_pct'],
+                'cohort': row['cohort'],
+                'refresh_tier': row['refresh_tier'],
+                'last_full_refresh': row['last_full_refresh'],
+                'last_price_update': row['last_price_update'],
+                'created_at': row['created_at'],
+                'hunting_score': row['hunting_score'],
+                'is_in_watchlist': bool(row['is_in_watchlist']),
+            })
+
+        logger.info(f"Loaded {len(positions)} cached positions")
+        return positions
+
+    def get_positions_by_tier(self, tier: str) -> List[dict]:
+        """
+        Get cached positions by refresh tier.
+
+        Args:
+            tier: 'critical', 'high', or 'normal'
+
+        Returns:
+            List of position dicts
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM position_cache WHERE refresh_tier = ?",
+                (tier,)
+            )
+            rows = cursor.fetchall()
+
+        return [dict(row) for row in rows]
+
+    def update_position_price(
+        self,
+        position_key: str,
+        mark_price: float,
+        distance_pct: Optional[float],
+        refresh_tier: str,
+        last_price_update: str
+    ):
+        """
+        Update mark price and distance for a cached position.
+
+        Args:
+            position_key: Position identifier
+            mark_price: New mark price
+            distance_pct: New distance to liquidation
+            refresh_tier: New tier classification
+            last_price_update: ISO timestamp
+        """
+        with self._get_connection() as conn:
+            conn.execute("""
+                UPDATE position_cache
+                SET mark_price = ?, distance_pct = ?, refresh_tier = ?, last_price_update = ?
+                WHERE position_key = ?
+            """, (mark_price, distance_pct, refresh_tier, last_price_update, position_key))
+
+    def update_position_full_refresh(
+        self,
+        position_key: str,
+        position_data: dict,
+        last_full_refresh: str
+    ):
+        """
+        Update a cached position with fresh data from API.
+
+        Args:
+            position_key: Position identifier
+            position_data: Dict with position fields to update
+            last_full_refresh: ISO timestamp
+        """
+        with self._get_connection() as conn:
+            conn.execute("""
+                UPDATE position_cache
+                SET size = ?, leverage = ?, leverage_type = ?, entry_price = ?,
+                    position_value = ?, liq_price = ?, margin_used = ?, unrealized_pnl = ?,
+                    mark_price = ?, distance_pct = ?, refresh_tier = ?,
+                    last_full_refresh = ?, last_price_update = ?
+                WHERE position_key = ?
+            """, (
+                position_data['size'],
+                position_data['leverage'],
+                position_data['leverage_type'],
+                position_data['entry_price'],
+                position_data['position_value'],
+                position_data.get('liq_price'),
+                position_data['margin_used'],
+                position_data['unrealized_pnl'],
+                position_data['mark_price'],
+                position_data.get('distance_pct'),
+                position_data.get('refresh_tier', 'normal'),
+                last_full_refresh,
+                last_full_refresh,
+                position_key,
+            ))
+
+    def delete_cached_positions(self, position_keys: List[str]):
+        """
+        Delete cached positions by key.
+
+        Args:
+            position_keys: List of position keys to delete
+        """
+        if not position_keys:
+            return
+
+        with self._get_connection() as conn:
+            placeholders = ','.join('?' * len(position_keys))
+            conn.execute(
+                f"DELETE FROM position_cache WHERE position_key IN ({placeholders})",
+                position_keys
+            )
+
+        logger.debug(f"Deleted {len(position_keys)} cached positions")
+
+    def delete_stale_positions(self, max_age_hours: int = 24) -> int:
+        """
+        Delete cached positions that haven't been refreshed recently.
+
+        Args:
+            max_age_hours: Maximum age in hours before deletion
+
+        Returns:
+            Number of positions deleted
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM position_cache WHERE last_full_refresh < ?",
+                (cutoff,)
+            )
+            deleted = cursor.rowcount
+
+        if deleted > 0:
+            logger.info(f"Deleted {deleted} stale cached positions (older than {max_age_hours}h)")
+
+        return deleted
+
+    def clear_position_cache(self):
+        """Clear all cached positions."""
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM position_cache")
+        logger.debug("Position cache cleared")
+
+    def get_position_cache_stats(self) -> dict:
+        """Get statistics about the position cache."""
+        with self._get_connection() as conn:
+            stats = {}
+
+            # Count by tier
+            cursor = conn.execute("""
+                SELECT refresh_tier, COUNT(*) as count
+                FROM position_cache
+                GROUP BY refresh_tier
+            """)
+            stats['by_tier'] = {row['refresh_tier']: row['count'] for row in cursor.fetchall()}
+
+            # Total count
+            cursor = conn.execute("SELECT COUNT(*) as count FROM position_cache")
+            stats['total'] = cursor.fetchone()['count']
+
+            # Count with liquidation price
+            cursor = conn.execute(
+                "SELECT COUNT(*) as count FROM position_cache WHERE liq_price IS NOT NULL"
+            )
+            stats['with_liq_price'] = cursor.fetchone()['count']
+
+        return stats
+
+    # =========================================================================
+    # Known Addresses Operations
+    # =========================================================================
+
+    def save_known_address(self, address: str, cohort: str):
+        """
+        Save or update a known address.
+
+        Args:
+            address: Wallet address
+            cohort: Cohort name
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            # Check if exists
+            cursor = conn.execute(
+                "SELECT first_seen FROM known_addresses WHERE address = ?",
+                (address,)
+            )
+            row = cursor.fetchone()
+
+            if row:
+                # Update existing
+                conn.execute("""
+                    UPDATE known_addresses
+                    SET cohort = ?, last_scanned = ?
+                    WHERE address = ?
+                """, (cohort, now, address))
+            else:
+                # Insert new
+                conn.execute("""
+                    INSERT INTO known_addresses (address, cohort, first_seen, last_scanned)
+                    VALUES (?, ?, ?, ?)
+                """, (address, cohort, now, now))
+
+    def save_known_addresses_batch(self, addresses: List[tuple]):
+        """
+        Save multiple known addresses efficiently.
+
+        Args:
+            addresses: List of (address, cohort) tuples
+        """
+        if not addresses:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            # Use INSERT OR REPLACE for simplicity
+            conn.executemany("""
+                INSERT OR REPLACE INTO known_addresses (address, cohort, first_seen, last_scanned)
+                VALUES (?, ?, COALESCE(
+                    (SELECT first_seen FROM known_addresses WHERE address = ?),
+                    ?
+                ), ?)
+            """, [
+                (addr, cohort, addr, now, now)
+                for addr, cohort in addresses
+            ])
+
+        logger.debug(f"Saved {len(addresses)} known addresses")
+
+    def load_known_addresses(self) -> Set[str]:
+        """
+        Load all known addresses.
+
+        Returns:
+            Set of wallet addresses
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT address FROM known_addresses")
+            addresses = {row['address'] for row in cursor.fetchall()}
+
+        logger.info(f"Loaded {len(addresses)} known addresses")
+        return addresses
+
+    def get_known_addresses_with_cohort(self) -> List[tuple]:
+        """
+        Load all known addresses with their cohorts.
+
+        Returns:
+            List of (address, cohort) tuples
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT address, cohort FROM known_addresses")
+            return [(row['address'], row['cohort']) for row in cursor.fetchall()]
+
+    def get_addresses_by_cohort(self, cohort: str) -> List[str]:
+        """
+        Get addresses for a specific cohort.
+
+        Args:
+            cohort: Cohort name
+
+        Returns:
+            List of addresses
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT address FROM known_addresses WHERE cohort = ?",
+                (cohort,)
+            )
+            return [row['address'] for row in cursor.fetchall()]
+
+    def clear_known_addresses(self):
+        """Clear all known addresses."""
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM known_addresses")
+        logger.debug("Known addresses cleared")
 
     # =========================================================================
     # Cohort Cache Operations
