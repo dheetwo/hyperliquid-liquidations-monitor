@@ -42,6 +42,7 @@ sys.path.insert(0, str(project_root))
 
 from src.monitor import MonitorService
 from src.monitor.alerts import send_test_alert
+from src.monitor.database import SQLiteLoggingHandler
 from config.monitor_settings import (
     SCAN_INTERVAL_MINUTES,
     POLL_INTERVAL_SECONDS,
@@ -99,12 +100,21 @@ def setup_logging(log_level: str = LOG_LEVEL, log_file: str = LOG_FILE):
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 
+    # SQLite handler (persists logs to database, survives container restarts)
+    sqlite_handler = SQLiteLoggingHandler(
+        db_path=project_root / "data" / "monitor.db",
+        level=getattr(logging, log_level.upper())
+    )
+    sqlite_handler.setFormatter(formatter)
+    root_logger.addHandler(sqlite_handler)
+
     # Reduce noise from requests library
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
 
     # Log which file we're writing to
     root_logger.info(f"Logging to: {dated_log_file}")
+    root_logger.info(f"Logs also persisted to SQLite database")
 
 
 def main():
