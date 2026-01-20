@@ -48,7 +48,6 @@ class WatchedPosition:
     liq_price: float
     position_value: float
     is_isolated: bool
-    hunting_score: float
 
     # Tracking state
     last_distance_pct: float = None

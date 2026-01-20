@@ -86,10 +86,11 @@
 │   │   │  └──────┘  └─────┘  └─────┘  └──────┘  └──────┘  └────┘     │ │   │
 │   │   └───────────────────────────────────────────────────────────────┘ │   │
 │   │                                                                     │   │
-│   │   Rate limiting:                                                    │   │
-│   │   • REQUEST_DELAY = 0.2s between calls                              │   │
-│   │   • BATCH_DELAY = 2.0s every 50 addresses                           │   │
-│   │   • DEX_DELAY = 0.1s between dex queries                            │   │
+│   │   Async streaming mode (optimized):                                 │   │
+│   │   • MAX_CONCURRENT_REQUESTS = 30 parallel connections               │   │
+│   │   • True streaming with asyncio.as_completed()                      │   │
+│   │   • Progress saved every 25 addresses (resume capability)           │   │
+│   │   • Auto-resume if interrupted within 30 minutes                    │   │
 │   │                                                                     │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                              │                              │

@@ -137,7 +137,6 @@ class MonitorService:
                     liq_price=pos_data['liq_price'],
                     position_value=pos_data['position_value'],
                     is_isolated=pos_data['is_isolated'],
-                    hunting_score=pos_data['hunting_score'],
                     last_distance_pct=pos_data['last_distance_pct'],
                     last_mark_price=pos_data['last_mark_price'],
                     threshold_pct=pos_data['threshold_pct'],

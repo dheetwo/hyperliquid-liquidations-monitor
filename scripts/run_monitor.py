@@ -42,6 +42,7 @@ sys.path.insert(0, str(project_root))
 
 from src.monitor import MonitorService
 from src.monitor.alerts import send_test_alert
+from src.utils.debug_logger import cleanup_old_logs
 from config.monitor_settings import (
     SCAN_INTERVAL_MINUTES,
     POLL_INTERVAL_SECONDS,
@@ -59,6 +60,7 @@ def ensure_directories():
         project_root / "data" / "raw",
         project_root / "data" / "processed",
         project_root / "logs",
+        project_root / "logs" / "scans",
     ]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
@@ -181,6 +183,9 @@ Examples:
     # Setup logging
     setup_logging(args.log_level)
     logger = logging.getLogger(__name__)
+
+    # Clean up old scan debug logs (keep 7 days)
+    cleanup_old_logs(days_to_keep=7)
 
     # Test Telegram mode
     if args.test_telegram:

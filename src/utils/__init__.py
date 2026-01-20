@@ -31,6 +31,12 @@ from .prices import (
     get_current_price,
 )
 
+from .debug_logger import (
+    ScanDebugLog,
+    ensure_scan_log_dir,
+    cleanup_old_logs,
+)
+
 __all__ = [
     # Path utilities
     "PROJECT_ROOT",
@@ -52,4 +58,8 @@ __all__ = [
     "fetch_all_mark_prices",
     "fetch_all_mark_prices_async",
     "get_current_price",
+    # Debug logging
+    "ScanDebugLog",
+    "ensure_scan_log_dir",
+    "cleanup_old_logs",
 ]
