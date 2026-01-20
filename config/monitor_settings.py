@@ -64,7 +64,7 @@ MAIN_LARGE_CAP = {"ETH"}
 MAIN_TIER1_ALTS = {"SOL", "BNB", "XRP"}
 MAIN_TIER2_ALTS = {
     "DOGE", "ADA", "AVAX", "LINK", "LTC",
-    "DOT", "MATIC", "UNI", "ATOM", "TRX", "SHIB"
+    "DOT", "MATIC", "UNI", "ATOM", "TRX", "SHIB", "HYPE"
 }
 MAIN_MID_ALTS = {
     "APT", "ARB", "OP", "SUI", "TON", "NEAR", "SEI", "TIA", "INJ",
