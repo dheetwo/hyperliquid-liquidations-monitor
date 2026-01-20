@@ -166,6 +166,25 @@ class MonitorDatabase:
                     exc_info TEXT
                 )
             """)
+
+            # Cohort cache (wallet addresses from Hyperdash API)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cohort_cache (
+                    address TEXT PRIMARY KEY,
+                    cohort TEXT NOT NULL,
+                    perp_equity REAL,
+                    perp_bias TEXT,
+                    position_value REAL,
+                    leverage REAL,
+                    sum_upnl REAL,
+                    pnl_cohort TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_cohort_cache_cohort
+                ON cohort_cache(cohort)
+            """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_service_logs_time
                 ON service_logs(timestamp)
@@ -300,6 +319,131 @@ class MonitorDatabase:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM baseline_positions")
         logger.debug("Baseline cleared")
+
+    # =========================================================================
+    # Cohort Cache Operations
+    # =========================================================================
+
+    def save_cohort_cache(self, traders: List[dict]):
+        """
+        Save cohort data (wallet addresses) to cache.
+        Replaces existing cache entirely.
+
+        Args:
+            traders: List of trader dicts with address, cohort, perp_equity, etc.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            # Clear existing cache
+            conn.execute("DELETE FROM cohort_cache")
+
+            # Insert all traders
+            for trader in traders:
+                conn.execute("""
+                    INSERT INTO cohort_cache (
+                        address, cohort, perp_equity, perp_bias,
+                        position_value, leverage, sum_upnl, pnl_cohort, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    trader.get('address', ''),
+                    trader.get('cohort', ''),
+                    trader.get('perp_equity'),
+                    trader.get('perp_bias'),
+                    trader.get('position_value'),
+                    trader.get('leverage'),
+                    trader.get('sum_upnl'),
+                    trader.get('pnl_cohort'),
+                    now
+                ))
+
+        # Also record the cache update time in service state
+        self.set_state('cohort_cache_updated_at', now)
+        logger.info(f"Saved {len(traders)} traders to cohort cache")
+
+    def load_cohort_cache(self, cohorts: Optional[List[str]] = None) -> List[dict]:
+        """
+        Load cohort data from cache.
+
+        Args:
+            cohorts: Optional list of cohort names to filter by.
+                    If None, returns all cached traders.
+
+        Returns:
+            List of trader dicts
+        """
+        with self._get_connection() as conn:
+            if cohorts:
+                placeholders = ','.join('?' * len(cohorts))
+                cursor = conn.execute(
+                    f"SELECT * FROM cohort_cache WHERE cohort IN ({placeholders})",
+                    cohorts
+                )
+            else:
+                cursor = conn.execute("SELECT * FROM cohort_cache")
+
+            traders = []
+            for row in cursor.fetchall():
+                traders.append({
+                    'address': row['address'],
+                    'cohort': row['cohort'],
+                    'perp_equity': row['perp_equity'],
+                    'perp_bias': row['perp_bias'],
+                    'position_value': row['position_value'],
+                    'leverage': row['leverage'],
+                    'sum_upnl': row['sum_upnl'],
+                    'pnl_cohort': row['pnl_cohort'],
+                })
+
+        logger.debug(f"Loaded {len(traders)} traders from cohort cache")
+        return traders
+
+    def get_cohort_cache_age_hours(self) -> Optional[float]:
+        """
+        Get the age of the cohort cache in hours.
+
+        Returns:
+            Age in hours, or None if no cache exists
+        """
+        updated_at = self.get_state('cohort_cache_updated_at')
+        if not updated_at:
+            return None
+
+        try:
+            cache_time = datetime.fromisoformat(updated_at)
+            now = datetime.now(timezone.utc)
+            age_seconds = (now - cache_time).total_seconds()
+            return age_seconds / 3600
+        except ValueError:
+            return None
+
+    def is_cohort_cache_fresh(self, max_age_hours: float) -> bool:
+        """
+        Check if the cohort cache is fresh enough to use.
+
+        Args:
+            max_age_hours: Maximum acceptable age in hours
+
+        Returns:
+            True if cache exists and is newer than max_age_hours
+        """
+        age_hours = self.get_cohort_cache_age_hours()
+        if age_hours is None:
+            return False
+        return age_hours <= max_age_hours
+
+    def get_cohort_cache_count(self) -> int:
+        """Get the number of traders in the cohort cache."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT COUNT(*) as count FROM cohort_cache")
+            return cursor.fetchone()['count']
+
+    def clear_cohort_cache(self):
+        """Clear the cohort cache."""
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM cohort_cache")
+            conn.execute("DELETE FROM service_state WHERE key = 'cohort_cache_updated_at'")
+        logger.debug("Cohort cache cleared")
 
     # =========================================================================
     # Position History Operations
