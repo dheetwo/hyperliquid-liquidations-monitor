@@ -51,11 +51,81 @@ COMPREHENSIVE_SCAN_MINUTE = 30  # Minute of comprehensive scan
 # ASSET CLASSIFICATIONS
 # =============================================================================
 
-# Majors: Most liquid assets
+# Isolated position multiplier (cross threshold / ISOLATED_MULTIPLIER = isolated threshold)
+ISOLATED_MULTIPLIER = 5.0
+
+# -----------------------------------------------------------------------------
+# MAIN EXCHANGE - Crypto Token Tiers
+# -----------------------------------------------------------------------------
+# Cross thresholds defined below; Isolated = Cross / ISOLATED_MULTIPLIER
+
+MAIN_MEGA_CAP = {"BTC"}
+MAIN_LARGE_CAP = {"ETH"}
+MAIN_TIER1_ALTS = {"SOL", "BNB", "XRP"}
+MAIN_TIER2_ALTS = {
+    "DOGE", "ADA", "AVAX", "LINK", "LTC",
+    "DOT", "MATIC", "UNI", "ATOM", "TRX", "SHIB"
+}
+MAIN_MID_ALTS = {
+    "APT", "ARB", "OP", "SUI", "TON", "NEAR", "SEI", "TIA", "INJ",
+    "PEPE", "WIF", "BONK", "FLOKI",
+    "AAVE", "MKR", "RENDER", "FET", "FIL"
+}
+# Everything else = SMALL_CAPS (default)
+
+# Cross thresholds for main exchange
+MAIN_THRESHOLDS_CROSS = {
+    "MEGA_CAP": 100_000_000,      # $100M - BTC
+    "LARGE_CAP": 75_000_000,      # $75M - ETH
+    "TIER1_ALTS": 25_000_000,     # $25M - SOL, BNB, XRP
+    "TIER2_ALTS": 10_000_000,     # $10M - DOGE, ADA, AVAX, etc.
+    "MID_ALTS": 5_000_000,        # $5M - APT, ARB, memes, DeFi, etc.
+    "SMALL_CAPS": 1_000_000,      # $1M - everything else
+}
+
+# Legacy compatibility
 MAJORS = ["ETH", "SOL", "BNB", "XRP"]
 
-# Isolated position multiplier (isolated positions count as 5x their notional)
-ISOLATED_MULTIPLIER = 5.0
+# -----------------------------------------------------------------------------
+# XYZ EXCHANGE - Equities, Commodities, Forex (All Isolated)
+# -----------------------------------------------------------------------------
+# xyz only supports isolated margin - no cross/isolated distinction needed
+
+XYZ_INDICES = {"XYZ100"}
+XYZ_MEGA_EQUITIES = {"AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"}
+XYZ_LARGE_EQUITIES = {"AMD", "NFLX", "COIN", "MSTR", "ORCL", "TSM", "LLY", "COST"}
+# Default for unknown stocks: BABA, CRCL, HOOD, INTC, MU, PLTR, RIVN, SKHX, SNDK, etc.
+
+XYZ_GOLD = {"GOLD"}
+XYZ_OIL = {"CL"}
+XYZ_SILVER = {"SILVER"}
+XYZ_METALS = {"COPPER"}
+XYZ_ENERGY = {"NATGAS"}
+XYZ_URANIUM = {"URANIUM"}
+XYZ_FOREX = {"EUR", "JPY"}
+
+# Thresholds for xyz exchange (all isolated)
+XYZ_THRESHOLDS = {
+    "INDICES": 5_000_000,         # $5M - XYZ100
+    "MEGA_EQUITIES": 3_000_000,   # $3M - AAPL, MSFT, NVDA, etc.
+    "LARGE_EQUITIES": 2_000_000,  # $2M - AMD, NFLX, COIN, etc.
+    "EQUITIES": 1_000_000,        # $1M - default for other stocks
+    "GOLD": 2_500_000,            # $2.5M
+    "OIL": 2_000_000,             # $2M - CL (crude)
+    "SILVER": 1_500_000,          # $1.5M
+    "METALS": 1_000_000,          # $1M - COPPER
+    "ENERGY": 800_000,            # $800K - NATGAS
+    "URANIUM": 500_000,           # $500K - low liquidity expected
+    "FOREX": 1_000_000,           # $1M - EUR, JPY
+}
+
+# -----------------------------------------------------------------------------
+# OTHER HIP-3 SUB-EXCHANGES (flx, vntl, hyna, km) - All Isolated
+# -----------------------------------------------------------------------------
+# These sub-exchanges have lower liquidity; flat threshold for all tokens
+
+OTHER_SUB_EXCHANGES = {"flx", "vntl", "hyna", "km"}
+OTHER_SUB_EXCHANGE_THRESHOLD = 500_000  # $500K for all tokens
 
 # =============================================================================
 # NEW POSITION ALERT THRESHOLDS
@@ -117,17 +187,8 @@ MIN_HUNTING_SCORE = 0
 # Maximum distance (%) to include in watchlist - positions farther won't be monitored
 MAX_WATCH_DISTANCE_PCT = 5.0
 
-# Minimum notional value thresholds for watchlist inclusion
-# Isolated positions: lower threshold (higher liquidation impact)
-# Cross positions: higher threshold (more buffer before liquidation)
-WATCHLIST_MIN_NOTIONAL_ISOLATED = 100_000    # $100K for isolated
-WATCHLIST_MIN_NOTIONAL_CROSS = 500_000       # $500K for cross (default)
-
-# Token-specific minimums for cross positions (majors need higher thresholds)
-WATCHLIST_MIN_NOTIONAL_BY_TOKEN = {
-    "BTC": 100_000_000,   # $100M for BTC cross
-    "ETH": 75_000_000,    # $75M for ETH cross
-}
+# Minimum notional thresholds are now defined via token classification above.
+# Use get_watchlist_threshold() function to get the threshold for a given token.
 
 # Maximum age (minutes) for cached position data to be used as fallback
 # If rate limited, will use cached data if it's newer than this
@@ -181,6 +242,73 @@ def get_proximity_alert_threshold() -> float:
         Distance threshold percentage for triggering proximity alerts.
     """
     return PROXIMITY_ALERT_THRESHOLD_PCT
+
+
+def get_watchlist_threshold(token: str, exchange: str, is_isolated: bool) -> float:
+    """
+    Get the minimum notional threshold for watchlist inclusion.
+
+    Uses token classification tiers with consistent 5:1 cross/isolated ratio
+    for main exchange, and specific thresholds for xyz assets.
+
+    Args:
+        token: Token symbol (e.g., "BTC", "TSLA", "GOLD")
+        exchange: Exchange name ("main", "xyz", "flx", "vntl", "hyna", "km")
+        is_isolated: Whether the position uses isolated margin
+
+    Returns:
+        Minimum notional value in USD
+    """
+    # xyz exchange - all isolated, use xyz-specific thresholds
+    if exchange == "xyz":
+        if token in XYZ_INDICES:
+            return XYZ_THRESHOLDS["INDICES"]
+        elif token in XYZ_MEGA_EQUITIES:
+            return XYZ_THRESHOLDS["MEGA_EQUITIES"]
+        elif token in XYZ_LARGE_EQUITIES:
+            return XYZ_THRESHOLDS["LARGE_EQUITIES"]
+        elif token in XYZ_GOLD:
+            return XYZ_THRESHOLDS["GOLD"]
+        elif token in XYZ_OIL:
+            return XYZ_THRESHOLDS["OIL"]
+        elif token in XYZ_SILVER:
+            return XYZ_THRESHOLDS["SILVER"]
+        elif token in XYZ_METALS:
+            return XYZ_THRESHOLDS["METALS"]
+        elif token in XYZ_ENERGY:
+            return XYZ_THRESHOLDS["ENERGY"]
+        elif token in XYZ_URANIUM:
+            return XYZ_THRESHOLDS["URANIUM"]
+        elif token in XYZ_FOREX:
+            return XYZ_THRESHOLDS["FOREX"]
+        else:
+            # Default for unknown xyz tokens (probably equities)
+            return XYZ_THRESHOLDS["EQUITIES"]
+
+    # Other HIP-3 sub-exchanges (flx, vntl, hyna, km) - flat threshold
+    if exchange in OTHER_SUB_EXCHANGES:
+        return OTHER_SUB_EXCHANGE_THRESHOLD
+
+    # Main exchange - use token tier classification
+    # Get cross threshold based on token class
+    if token in MAIN_MEGA_CAP:
+        cross_threshold = MAIN_THRESHOLDS_CROSS["MEGA_CAP"]
+    elif token in MAIN_LARGE_CAP:
+        cross_threshold = MAIN_THRESHOLDS_CROSS["LARGE_CAP"]
+    elif token in MAIN_TIER1_ALTS:
+        cross_threshold = MAIN_THRESHOLDS_CROSS["TIER1_ALTS"]
+    elif token in MAIN_TIER2_ALTS:
+        cross_threshold = MAIN_THRESHOLDS_CROSS["TIER2_ALTS"]
+    elif token in MAIN_MID_ALTS:
+        cross_threshold = MAIN_THRESHOLDS_CROSS["MID_ALTS"]
+    else:
+        cross_threshold = MAIN_THRESHOLDS_CROSS["SMALL_CAPS"]
+
+    # Apply isolated multiplier (5:1 ratio)
+    if is_isolated:
+        return cross_threshold / ISOLATED_MULTIPLIER
+    else:
+        return cross_threshold
 
 
 def passes_new_position_threshold(

@@ -16,10 +16,8 @@ from src.utils.csv_helpers import sanitize_csv_value
 from config.monitor_settings import (
     MAX_WATCH_DISTANCE_PCT,
     MIN_HUNTING_SCORE,
-    WATCHLIST_MIN_NOTIONAL_ISOLATED,
-    WATCHLIST_MIN_NOTIONAL_CROSS,
-    WATCHLIST_MIN_NOTIONAL_BY_TOKEN,
     get_proximity_alert_threshold,
+    get_watchlist_threshold,
 )
 
 if TYPE_CHECKING:
@@ -133,14 +131,8 @@ def build_watchlist(filtered_positions: List[Dict]) -> Dict[str, WatchedPosition
             if hunting_score < MIN_HUNTING_SCORE:
                 continue
 
-            # Apply notional filters
-            if is_isolated:
-                min_notional = WATCHLIST_MIN_NOTIONAL_ISOLATED
-            else:
-                # Check token-specific threshold first, then default
-                min_notional = WATCHLIST_MIN_NOTIONAL_BY_TOKEN.get(
-                    token, WATCHLIST_MIN_NOTIONAL_CROSS
-                )
+            # Apply notional filters using token classification system
+            min_notional = get_watchlist_threshold(token, exchange, is_isolated)
 
             if position_value < min_notional:
                 filtered_by_notional += 1
