@@ -277,7 +277,8 @@ class TelegramAlerts:
             else:
                 value_str = f"${pos.position_value / 1_000:.0f}K"
             dist_str = f"{pos.last_distance_pct:.2f}%"
-            formatted.append((pos, pos.token, side_str, value_str, margin_type, dist_str))
+            cohort_str = pos.cohort_display if hasattr(pos, 'cohort_display') else ""
+            formatted.append((pos, pos.token, side_str, value_str, margin_type, dist_str, cohort_str))
 
         # Find max width for each column
         max_token = max(len(f[1]) for f in formatted)
@@ -286,12 +287,12 @@ class TelegramAlerts:
         max_margin = max(len(f[4]) for f in formatted)
         max_dist = max(len(f[5]) for f in formatted)
 
-        for pos, token, side_str, value_str, margin_type, dist_str in formatted:
+        for pos, token, side_str, value_str, margin_type, dist_str, cohort_str in formatted:
             hypurrscan_url = f"https://hypurrscan.io/address/{pos.address}"
 
             # Truncate address with equal chars on each side and ellipsis in middle
             addr = pos.address
-            addr_display = f"{addr[:18]}...{addr[-18:]}"
+            addr_display = f"{addr[:6]}...{addr[-4:]}"
 
             row = (
                 f"{token:<{max_token}} | "
@@ -301,7 +302,11 @@ class TelegramAlerts:
                 f"{dist_str:<{max_dist}}"
             )
             lines.append(f"<code>{row}</code>")
-            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a>")
+            # Show address link with cohort tags after
+            if cohort_str:
+                lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})")
+            else:
+                lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a>")
             lines.append("")
 
         if len(positions) > 15:
@@ -357,7 +362,8 @@ class TelegramAlerts:
             else:
                 value_str = f"${pos.position_value / 1_000:.0f}K"
             dist_str = f"{pos.last_distance_pct:.1f}%"
-            formatted.append((pos, pos.token, side_str, value_str, margin_type, dist_str))
+            cohort_str = pos.cohort_display if hasattr(pos, 'cohort_display') else ""
+            formatted.append((pos, pos.token, side_str, value_str, margin_type, dist_str, cohort_str))
 
         # Find max width for each column
         max_token = max(len(f[1]) for f in formatted)
@@ -366,12 +372,12 @@ class TelegramAlerts:
         max_margin = max(len(f[4]) for f in formatted)
         max_dist = max(len(f[5]) for f in formatted)
 
-        for pos, token, side_str, value_str, margin_type, dist_str in formatted:
+        for pos, token, side_str, value_str, margin_type, dist_str, cohort_str in formatted:
             hypurrscan_url = f"https://hypurrscan.io/address/{pos.address}"
 
             # Truncate address with equal chars on each side and ellipsis in middle
             addr = pos.address
-            addr_display = f"{addr[:18]}...{addr[-18:]}"
+            addr_display = f"{addr[:6]}...{addr[-4:]}"
 
             row = (
                 f"{token:<{max_token}} | "
@@ -381,7 +387,11 @@ class TelegramAlerts:
                 f"{dist_str:<{max_dist}}"
             )
             lines.append(f"<code>{row}</code>")
-            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a>")
+            # Show address link with cohort tags after
+            if cohort_str:
+                lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})")
+            else:
+                lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a>")
             lines.append("")
 
         if len(positions) > 10:
@@ -431,6 +441,7 @@ class TelegramAlerts:
 
         side_str = "L" if position.side == "Long" else "S"
         margin_type = "Iso" if position.is_isolated else "Cross"
+        cohort_str = position.cohort_display if hasattr(position, 'cohort_display') else ""
 
         # Format position value
         if position.position_value >= 1_000_000:
@@ -450,13 +461,19 @@ class TelegramAlerts:
         # Hypurrscan link
         hypurrscan_url = f"https://hypurrscan.io/address/{position.address}"
         addr = position.address
-        addr_display = f"{addr[:18]}...{addr[-18:]}"
+        addr_display = f"{addr[:6]}...{addr[-4:]}"
+
+        # Build address line with cohort tags after
+        if cohort_str:
+            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
+        else:
+            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
 
         lines = [
             "APPROACHING LIQUIDATION",
             "",
             f"{position.token} | {side_str} | {value_str} | {margin_type}",
-            f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            addr_line,
             "",
             f"Liquidation Distance: {previous_distance:.2f}% -> <b>{position.last_distance_pct:.2f}%</b>",
             f"Liq. Price: {format_price(position.liq_price)} | Current Price: {format_price(current_price)}",
@@ -505,6 +522,7 @@ class TelegramAlerts:
 
         side_str = "L" if position.side == "Long" else "S"
         margin_type = "Iso" if position.is_isolated else "Cross"
+        cohort_str = position.cohort_display if hasattr(position, 'cohort_display') else ""
 
         if position.position_value >= 1_000_000:
             value_str = f"${position.position_value / 1_000_000:.1f}M"
@@ -521,13 +539,19 @@ class TelegramAlerts:
 
         hypurrscan_url = f"https://hypurrscan.io/address/{position.address}"
         addr = position.address
-        addr_display = f"{addr[:18]}...{addr[-18:]}"
+        addr_display = f"{addr[:6]}...{addr[-4:]}"
+
+        # Build address line with cohort tags after
+        if cohort_str:
+            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
+        else:
+            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
 
         lines = [
             "🚨 IMMINENT LIQUIDATION",
             "",
             f"{position.token} | {side_str} | {value_str} | {margin_type}",
-            f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            addr_line,
             "",
             f"Liquidation Distance: {previous_distance:.3f}% -> <b>{position.last_distance_pct:.3f}%</b>",
             f"Liq. Price: {format_price(position.liq_price)} | Current Price: {format_price(current_price)}",
@@ -569,6 +593,7 @@ class TelegramAlerts:
 
         side_str = "L" if position.side == "Long" else "S"
         margin_type = "Iso" if position.is_isolated else "Cross"
+        cohort_str = position.cohort_display if hasattr(position, 'cohort_display') else ""
 
         if position.position_value >= 1_000_000:
             value_str = f"${position.position_value / 1_000_000:.1f}M"
@@ -585,13 +610,19 @@ class TelegramAlerts:
 
         hypurrscan_url = f"https://hypurrscan.io/address/{position.address}"
         addr = position.address
-        addr_display = f"{addr[:18]}...{addr[-18:]}"
+        addr_display = f"{addr[:6]}...{addr[-4:]}"
+
+        # Build address line with cohort tags after
+        if cohort_str:
+            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
+        else:
+            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
 
         lines = [
             "✅ POSITION RECOVERED",
             "",
             f"{position.token} | {side_str} | {value_str} | {margin_type}",
-            f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            addr_line,
             "",
             f"Liquidation Distance: {previous_distance:.3f}% -> <b>{position.last_distance_pct:.2f}%</b>",
             f"Liq. Price: {format_price(position.liq_price)} | Current Price: {format_price(current_price)}",

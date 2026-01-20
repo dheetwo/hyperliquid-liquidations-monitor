@@ -70,8 +70,8 @@ hyperdash_scanner/
 
 **Step 1: Cohort Scraper** (`src/pipeline/step1_cohort.py`)
 - Source: `https://api.hyperdash.com/graphql` (GetSizeCohort query)
-- Fetches wallet addresses grouped by account size
-- Priority order: kraken → large_whale → whale → shark
+- Fetches wallet addresses grouped by account size and PnL
+- Priority order: kraken → large_whale → whale → rekt → shark → very_unprofitable
 - Output: `data/raw/cohort_data*.csv`
 
 **Step 2: Position Scraper** (`src/pipeline/step2_position.py`)
@@ -89,12 +89,16 @@ hyperdash_scanner/
 
 ## Cohort Definitions
 
-| Cohort | Account Size | Priority | Typical Count |
-|--------|-------------|----------|---------------|
-| kraken | $5M+ | 1 (highest) | ~65 |
-| large_whale | $1M-$5M | 2 | ~256 |
-| whale | $250K-$1M | 3 | ~280 |
-| shark | $100K-$250K | 4 (lowest) | ~1559 |
+| Cohort | Account Size | Priority | Typical Count | Scan Modes |
+|--------|-------------|----------|---------------|------------|
+| kraken | $5M+ | 1 (highest) | ~65 | all |
+| large_whale | $1M-$5M | 2 | ~256 | all |
+| whale | $250K-$1M | 3 | ~280 | normal, comprehensive |
+| rekt | Realized losses | 3 | varies | all (high-priority, normal, comprehensive) |
+| extremely_profitable | Large realized profits | 3 | varies | normal, comprehensive |
+| shark | $100K-$250K | 4 | ~1559 | comprehensive only |
+| very_unprofitable | Large unrealized losses | 5 (lowest) | varies | comprehensive only |
+| very_profitable | Realized profits | 5 | varies | comprehensive only |
 
 ## Exchange Coverage
 
@@ -345,9 +349,9 @@ python scripts/run_monitor.py --test-telegram
 
 | Mode | Cohorts | Exchanges | Use Case |
 |------|---------|-----------|----------|
-| high-priority | kraken, large_whale | main, xyz | Fast scan of largest traders |
-| normal | kraken, large_whale, whale | main, xyz | Default balanced scan |
-| comprehensive | all (+ shark) | all 6 exchanges | Full coverage, slower |
+| high-priority | kraken, large_whale, rekt | main, xyz | Fast scan of largest + rekt traders |
+| normal | kraken, large_whale, whale, rekt, extremely_profitable | main, xyz | Default balanced scan |
+| comprehensive | all cohorts | all 6 exchanges | Full coverage, slower |
 
 ## Common Commands
 
@@ -358,7 +362,7 @@ python scripts/scan_cohorts.py
 
 # Step 2: Fetch position data (choose scan mode)
 python scripts/scan_positions.py                       # Normal mode (default)
-python scripts/scan_positions.py --mode high-priority  # Fast: kraken + large_whale, main + xyz
+python scripts/scan_positions.py --mode high-priority  # Fast: kraken + large_whale + rekt, main + xyz
 python scripts/scan_positions.py --mode comprehensive  # Full: all cohorts, all exchanges
 python scripts/scan_positions.py -m normal -o out.csv  # Custom output
 # Output: data/raw/position_data_{mode}.csv
@@ -460,7 +464,7 @@ query GetSizeCohort($id: String!, $limit: Int!, $offset: Int!) {
   }
 }
 """
-# cohort ids: "kraken", "large_whale", "whale", "shark"
+# cohort ids: "kraken", "large_whale", "whale", "rekt", "extremely_profitable", "shark", "very_unprofitable", "very_profitable"
 ```
 
 ### Hyperliquid API
