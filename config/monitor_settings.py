@@ -181,6 +181,25 @@ CRITICAL_REFRESH_SCALE_FACTOR = 0.3 # Seconds to add per position
 MAX_CRITICAL_POSITIONS = 30         # Max positions to track (prioritize closest)
 
 # =============================================================================
+# LIQUIDATION STATUS MONITORING
+# =============================================================================
+# Detect and alert on position state changes: collateral additions, liquidations.
+# These alerts inform about events that have occurred, not just proximity warnings.
+
+# Minimum liquidation price change (%) to detect collateral addition
+# For longs: liq price must decrease by this % (safer)
+# For shorts: liq price must increase by this % (safer)
+COLLATERAL_CHANGE_MIN_PCT = 2.0
+
+# Minimum position value drop (%) to consider a partial liquidation
+# E.g., if position drops from $5M to $4M (20% drop), it's a partial liq
+PARTIAL_LIQ_THRESHOLD_PCT = 10.0
+
+# Whether to alert on natural price recovery (price moved favorably)
+# If False, only alert when user adds collateral (liq price changes)
+ALERT_NATURAL_RECOVERY = False
+
+# =============================================================================
 # WATCHLIST SETTINGS
 # =============================================================================
 

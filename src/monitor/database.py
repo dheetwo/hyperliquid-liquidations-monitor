@@ -101,6 +101,10 @@ class MonitorDatabase:
                     first_seen_scan TEXT,
                     alert_message_id INTEGER,
                     last_proximity_message_id INTEGER,
+                    previous_liq_price REAL,
+                    previous_position_value REAL,
+                    alerted_collateral_added INTEGER DEFAULT 0,
+                    alerted_liquidation INTEGER DEFAULT 0,
                     updated_at TEXT NOT NULL
                 )
             """)
@@ -140,6 +144,29 @@ class MonitorDatabase:
                     details TEXT,
                     timestamp TEXT NOT NULL
                 )
+            """)
+
+            # Liquidation events (status changes: collateral added, partial/full liquidation)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS liquidation_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    position_key TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    old_value REAL,
+                    new_value REAL,
+                    old_liq_price REAL,
+                    new_liq_price REAL,
+                    details TEXT,
+                    timestamp TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_liquidation_events_key
+                ON liquidation_events(position_key)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_liquidation_events_time
+                ON liquidation_events(timestamp)
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_alert_log_time
@@ -220,14 +247,18 @@ class MonitorDatabase:
                         last_distance_pct, last_mark_price, threshold_pct,
                         alerted_proximity, alerted_critical, in_critical_zone,
                         first_seen_scan, alert_message_id, last_proximity_message_id,
+                        previous_liq_price, previous_position_value,
+                        alerted_collateral_added, alerted_liquidation,
                         updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     key, pos.address, pos.token, pos.exchange, pos.side,
                     pos.liq_price, pos.position_value, int(pos.is_isolated), pos.hunting_score,
                     pos.last_distance_pct, pos.last_mark_price, pos.threshold_pct,
                     int(pos.alerted_proximity), int(pos.alerted_critical), int(pos.in_critical_zone),
                     pos.first_seen_scan, pos.alert_message_id, pos.last_proximity_message_id,
+                    pos.previous_liq_price, pos.previous_position_value,
+                    int(pos.alerted_collateral_added), int(pos.alerted_liquidation),
                     now
                 ))
 
@@ -265,6 +296,10 @@ class MonitorDatabase:
                 'first_seen_scan': row['first_seen_scan'],
                 'alert_message_id': row['alert_message_id'],
                 'last_proximity_message_id': row['last_proximity_message_id'],
+                'previous_liq_price': row['previous_liq_price'],
+                'previous_position_value': row['previous_position_value'],
+                'alerted_collateral_added': bool(row['alerted_collateral_added']) if row['alerted_collateral_added'] is not None else False,
+                'alerted_liquidation': bool(row['alerted_liquidation']) if row['alerted_liquidation'] is not None else False,
             })
 
         logger.info(f"Loaded {len(positions)} positions from watchlist")
@@ -575,6 +610,70 @@ class MonitorDatabase:
             return [dict(row) for row in cursor.fetchall()]
 
     # =========================================================================
+    # Liquidation Event Operations
+    # =========================================================================
+
+    def log_liquidation_event(
+        self,
+        position_key: str,
+        event_type: str,
+        old_value: Optional[float] = None,
+        new_value: Optional[float] = None,
+        old_liq_price: Optional[float] = None,
+        new_liq_price: Optional[float] = None,
+        details: Optional[str] = None
+    ):
+        """
+        Log a liquidation status event.
+
+        Args:
+            position_key: Position identifier
+            event_type: Type of event ('collateral_added', 'partial_liquidation', 'full_liquidation')
+            old_value: Previous position value
+            new_value: New position value
+            old_liq_price: Previous liquidation price
+            new_liq_price: New liquidation price
+            details: Additional details
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO liquidation_events
+                (position_key, event_type, old_value, new_value, old_liq_price, new_liq_price, details, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (position_key, event_type, old_value, new_value, old_liq_price, new_liq_price, details, now))
+
+    def get_liquidation_events(self, hours: int = 24, event_type: Optional[str] = None) -> List[dict]:
+        """
+        Get recent liquidation events.
+
+        Args:
+            hours: How many hours of events to fetch
+            event_type: Optional filter by event type
+
+        Returns:
+            List of event records
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+        with self._get_connection() as conn:
+            if event_type:
+                cursor = conn.execute("""
+                    SELECT * FROM liquidation_events
+                    WHERE timestamp > ? AND event_type = ?
+                    ORDER BY timestamp DESC
+                """, (cutoff, event_type))
+            else:
+                cursor = conn.execute("""
+                    SELECT * FROM liquidation_events
+                    WHERE timestamp > ?
+                    ORDER BY timestamp DESC
+                """, (cutoff,))
+
+            return [dict(row) for row in cursor.fetchall()]
+
+    # =========================================================================
     # Service State Operations
     # =========================================================================
 
@@ -722,7 +821,7 @@ class MonitorDatabase:
         alert_cutoff = (datetime.now(timezone.utc) - timedelta(days=alert_days)).isoformat()
         log_cutoff = (datetime.now(timezone.utc) - timedelta(days=log_days)).isoformat()
 
-        deleted = {'position_history': 0, 'alert_log': 0, 'service_logs': 0}
+        deleted = {'position_history': 0, 'alert_log': 0, 'service_logs': 0, 'liquidation_events': 0}
 
         with self._get_connection() as conn:
             cursor = conn.execute(
@@ -740,10 +839,16 @@ class MonitorDatabase:
             )
             deleted['service_logs'] = cursor.rowcount
 
+            cursor = conn.execute(
+                "DELETE FROM liquidation_events WHERE timestamp < ?", (alert_cutoff,)
+            )
+            deleted['liquidation_events'] = cursor.rowcount
+
         if any(v > 0 for v in deleted.values()):
             logger.info(
                 f"Pruned old data: {deleted['position_history']} history, "
-                f"{deleted['alert_log']} alerts, {deleted['service_logs']} logs"
+                f"{deleted['alert_log']} alerts, {deleted['service_logs']} logs, "
+                f"{deleted['liquidation_events']} liquidation events"
             )
 
         return deleted
@@ -759,7 +864,7 @@ class MonitorDatabase:
         with self._get_connection() as conn:
             stats = {}
 
-            for table in ['watchlist', 'baseline_positions', 'position_history', 'alert_log', 'service_logs']:
+            for table in ['watchlist', 'baseline_positions', 'position_history', 'alert_log', 'service_logs', 'liquidation_events']:
                 cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table}")
                 stats[table] = cursor.fetchone()['count']
 

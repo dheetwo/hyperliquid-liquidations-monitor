@@ -636,6 +636,189 @@ class TelegramAlerts:
         reply_to = reply_to_message_id or position.alert_message_id
         return self._send_message(message, reply_to_message_id=reply_to)
 
+    def send_collateral_added_alert(
+        self,
+        position: "WatchedPosition",
+        old_liq_price: float,
+        new_liq_price: float,
+        old_distance: float,
+        new_distance: float,
+        reply_to_message_id: int = None,
+        alert_time: datetime = None
+    ) -> Optional[int]:
+        """
+        Send alert when user adds collateral to a position.
+
+        Detected by liquidation price moving away from current price
+        while position size remains unchanged.
+
+        Args:
+            position: WatchedPosition that had collateral added
+            old_liq_price: Previous liquidation price
+            new_liq_price: New liquidation price (farther from current)
+            old_distance: Previous distance percentage
+            new_distance: New distance percentage (should be larger)
+            reply_to_message_id: Message to reply to (for threading)
+            alert_time: Timestamp of the alert (default: now)
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        if alert_time is None:
+            alert_time = datetime.now(timezone.utc)
+
+        alert_time_et = alert_time.astimezone(EASTERN_TZ)
+
+        side_str = "L" if position.side == "Long" else "S"
+        margin_type = "Iso" if position.is_isolated else "Cross"
+        cohort_str = position.cohort_display if hasattr(position, 'cohort_display') else ""
+
+        if position.position_value >= 1_000_000:
+            value_str = f"${position.position_value / 1_000_000:.1f}M"
+        else:
+            value_str = f"${position.position_value / 1_000:.0f}K"
+
+        def format_price(p: float) -> str:
+            if p >= 1000:
+                return f"${p:,.0f}"
+            elif p >= 1:
+                return f"${p:.2f}"
+            else:
+                return f"${p:.6f}"
+
+        # Calculate how much safer the liq price is now
+        liq_change_pct = abs(new_liq_price - old_liq_price) / old_liq_price * 100
+
+        hypurrscan_url = f"https://hypurrscan.io/address/{position.address}"
+        addr = position.address
+        addr_display = f"{addr[:6]}...{addr[-4:]}"
+
+        if cohort_str:
+            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
+        else:
+            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
+
+        lines = [
+            "💰 COLLATERAL ADDED",
+            "",
+            f"{position.token} | {side_str} | {value_str} | {margin_type}",
+            addr_line,
+            "",
+            f"Liq Price: {format_price(old_liq_price)} -> {format_price(new_liq_price)} ({liq_change_pct:.1f}% safer)",
+            f"Distance: {old_distance:.2f}% -> <b>{new_distance:.2f}%</b>",
+            "",
+            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
+        ]
+
+        message = "\n".join(lines)
+
+        reply_to = reply_to_message_id or position.alert_message_id
+        return self._send_message(message, reply_to_message_id=reply_to)
+
+    def send_liquidation_alert(
+        self,
+        position: "WatchedPosition",
+        liquidation_type: str,
+        old_value: float,
+        new_value: float = 0,
+        last_distance: float = None,
+        current_price: float = None,
+        reply_to_message_id: int = None,
+        alert_time: datetime = None
+    ) -> Optional[int]:
+        """
+        Send alert when a position is partially or fully liquidated.
+
+        Args:
+            position: WatchedPosition that was liquidated
+            liquidation_type: "full" or "partial"
+            old_value: Previous position value
+            new_value: New position value (0 for full liquidation)
+            last_distance: Last known distance percentage before liquidation
+            current_price: Current mark price at time of liquidation
+            reply_to_message_id: Message to reply to (for threading)
+            alert_time: Timestamp of the alert (default: now)
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        if alert_time is None:
+            alert_time = datetime.now(timezone.utc)
+
+        alert_time_et = alert_time.astimezone(EASTERN_TZ)
+
+        side_str = "L" if position.side == "Long" else "S"
+        margin_type = "Iso" if position.is_isolated else "Cross"
+        cohort_str = position.cohort_display if hasattr(position, 'cohort_display') else ""
+
+        def format_value(v: float) -> str:
+            if v >= 1_000_000:
+                return f"${v / 1_000_000:.1f}M"
+            elif v >= 1_000:
+                return f"${v / 1_000:.0f}K"
+            else:
+                return f"${v:.0f}"
+
+        def format_price(p: float) -> str:
+            if p >= 1000:
+                return f"${p:,.0f}"
+            elif p >= 1:
+                return f"${p:.2f}"
+            else:
+                return f"${p:.6f}"
+
+        hypurrscan_url = f"https://hypurrscan.io/address/{position.address}"
+        addr = position.address
+        addr_display = f"{addr[:6]}...{addr[-4:]}"
+
+        if cohort_str:
+            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
+        else:
+            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
+
+        old_value_str = format_value(old_value)
+
+        if liquidation_type == "full":
+            emoji = "🔴"
+            title = "LIQUIDATED"
+            value_change = f"{old_value_str} -> <b>$0</b>"
+            detail_line = "Position fully liquidated"
+        else:
+            emoji = "⚠️"
+            title = "PARTIAL LIQUIDATION"
+            reduction_pct = (old_value - new_value) / old_value * 100
+            value_change = f"{old_value_str} -> <b>{format_value(new_value)}</b>"
+            detail_line = f"Position reduced by {reduction_pct:.0f}%"
+
+        lines = [
+            f"{emoji} {title}",
+            "",
+            f"{position.token} | {side_str} | {old_value_str} | {margin_type}",
+            addr_line,
+            "",
+            f"Position Value: {value_change}",
+            detail_line,
+        ]
+
+        if last_distance is not None:
+            lines.append(f"Last distance: {last_distance:.3f}%")
+
+        # Show liq price and current price (like imminent liquidation alert)
+        if position.liq_price and current_price:
+            lines.append(f"Liq. Price: {format_price(position.liq_price)} | Final Price: {format_price(current_price)}")
+        elif position.liq_price:
+            lines.append(f"Liq. Price: {format_price(position.liq_price)}")
+
+        lines.extend([
+            "",
+            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
+        ])
+
+        message = "\n".join(lines)
+
+        reply_to = reply_to_message_id or position.alert_message_id
+        return self._send_message(message, reply_to_message_id=reply_to)
+
     def send_startup_phase_alert(
         self,
         phase: int,
