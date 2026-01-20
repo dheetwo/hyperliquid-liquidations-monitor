@@ -133,6 +133,12 @@ WATCHLIST_MIN_NOTIONAL_BY_TOKEN = {
 # If rate limited, will use cached data if it's newer than this
 POSITION_CACHE_MAX_AGE_MINUTES = 30
 
+# Maximum age (hours) for cohort cache (wallet addresses)
+# Cohort membership doesn't change frequently, so we can cache it for longer.
+# Only comprehensive scans will refresh the cohort cache; normal/high-priority
+# scans will use cached data if it's fresh enough.
+COHORT_CACHE_MAX_AGE_HOURS = 24  # 24 hours
+
 # =============================================================================
 # TELEGRAM SETTINGS
 # =============================================================================

@@ -20,7 +20,7 @@ from typing import Dict, Optional, Tuple, TYPE_CHECKING
 
 import requests
 
-from src.models import WatchedPosition
+from src.models import WatchedPosition, CohortTrader
 from src.utils.paths import validate_file_path
 from src.pipeline import (
     fetch_cohorts,
@@ -33,7 +33,7 @@ from src.pipeline import (
     filter_positions,
     SCAN_MODES,
 )
-from config.monitor_settings import COHORT_DATA_PATH
+from config.monitor_settings import COHORT_DATA_PATH, COHORT_CACHE_MAX_AGE_HOURS
 from .watchlist import load_filtered_positions, build_watchlist, detect_new_positions
 
 if TYPE_CHECKING:
@@ -86,18 +86,68 @@ def run_scan_phase(
 
     scan_start = datetime.now(timezone.utc)
 
-    # Step 1: Fetch cohort data
-    logger.info("Step 1: Fetching cohort data...")
-    try:
-        traders = fetch_cohorts(PRIORITY_COHORTS, delay=1.0)
-        save_cohort_csv(traders, COHORT_DATA_PATH)
-        logger.info(f"Saved {len(traders)} traders to {COHORT_DATA_PATH}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Cohort fetch network error: {type(e).__name__}")
-        return 0, 0
-    except (OSError, csv.Error) as e:
-        logger.error(f"Cohort data save error: {type(e).__name__}: {e}")
-        return 0, 0
+    # Step 1: Fetch cohort data (or use cache)
+    # Comprehensive scans always refresh the cohort cache.
+    # Normal/high-priority scans use cached cohort data if fresh enough.
+    use_cached_cohorts = (
+        scan_mode != "comprehensive"
+        and service.db.is_cohort_cache_fresh(COHORT_CACHE_MAX_AGE_HOURS)
+    )
+
+    if use_cached_cohorts:
+        cache_age = service.db.get_cohort_cache_age_hours()
+        logger.info(f"Step 1: Using cached cohort data ({cache_age:.1f}h old)")
+        try:
+            # Load from cache and convert to CohortTrader objects
+            cached_traders = service.db.load_cohort_cache()
+            traders = [
+                CohortTrader(
+                    address=t['address'],
+                    perp_equity=t['perp_equity'] or 0,
+                    perp_bias=t['perp_bias'] or '',
+                    position_value=t['position_value'] or 0,
+                    leverage=t['leverage'] or 0,
+                    sum_upnl=t['sum_upnl'] or 0,
+                    pnl_cohort=t['pnl_cohort'] or '',
+                    cohort=t['cohort']
+                )
+                for t in cached_traders
+            ]
+            # Write to CSV for position scraper compatibility
+            save_cohort_csv(traders, COHORT_DATA_PATH)
+            logger.info(f"Loaded {len(traders)} traders from cache, saved to {COHORT_DATA_PATH}")
+        except Exception as e:
+            logger.warning(f"Failed to load cohort cache: {e}, falling back to API fetch")
+            use_cached_cohorts = False
+
+    if not use_cached_cohorts:
+        logger.info("Step 1: Fetching cohort data from API...")
+        try:
+            traders = fetch_cohorts(PRIORITY_COHORTS, delay=1.0)
+            save_cohort_csv(traders, COHORT_DATA_PATH)
+            logger.info(f"Saved {len(traders)} traders to {COHORT_DATA_PATH}")
+
+            # Update cohort cache
+            cache_data = [
+                {
+                    'address': t.address,
+                    'cohort': t.cohort,
+                    'perp_equity': t.perp_equity,
+                    'perp_bias': t.perp_bias,
+                    'position_value': t.position_value,
+                    'leverage': t.leverage,
+                    'sum_upnl': t.sum_upnl,
+                    'pnl_cohort': t.pnl_cohort,
+                }
+                for t in traders
+            ]
+            service.db.save_cohort_cache(cache_data)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Cohort fetch network error: {type(e).__name__}")
+            return 0, 0
+        except (OSError, csv.Error) as e:
+            logger.error(f"Cohort data save error: {type(e).__name__}: {e}")
+            return 0, 0
 
     # Step 2: Fetch position data
     logger.info("Step 2: Fetching position data...")
