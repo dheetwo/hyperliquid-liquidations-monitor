@@ -1,17 +1,27 @@
-# CLAUDE.md - Hyperdash Liquidation Hunter
+# CLAUDE.md - Hyperdash Liquidation Monitor
 
 ## Project Objective
 
-Scan publicly visible positions on Hyperdash.com to find **liquidation hunting opportunities** on Hyperliquid perpetual futures.
+Monitor publicly visible positions on Hyperdash.com and alert subscribers about **liquidation status changes** on Hyperliquid perpetual futures.
 
 ### Core Goal
-Find large positions where:
-1. **Liquidation price exists** - Positions without a liquidation price are useless for this purpose
-2. **Liquidation price is close to current price** - These are the huntable targets
-3. **Position is large enough to cause price impact** - A liquidation that moves the market is the goal
-4. **Isolated positions are highest priority** - Sub-exchange positions (xyz, flx, vntl, hyna, km) have larger price impact
+Alert subscribers about:
+1. **Imminent liquidations** - Positions approaching liquidation threshold
+2. **Collateral additions** - When users add margin to restore position health
+3. **Partial/Full liquidations** - When positions are liquidated
 
-The ultimate question: *How much would liquidating this position move the price?*
+### Alert Types
+
+| Alert | Description | When Triggered |
+|-------|-------------|----------------|
+| 🚨 IMMINENT LIQUIDATION | Position is critically close to liquidation | Distance < 0.1% |
+| APPROACHING LIQUIDATION | Position entering danger zone | Distance < 0.5% |
+| 💰 COLLATERAL ADDED | User added margin, position safer | Liq price moved away from current |
+| ⚠️ PARTIAL LIQUIDATION | Position partially liquidated | Position value dropped >10% |
+| 🔴 LIQUIDATED | Position fully liquidated | Position disappeared from API |
+
+### What We DON'T Alert On
+- **Natural price recovery** - When price moves favorably without user action (silent)
 
 ## Project Structure
 
@@ -308,15 +318,35 @@ POLL_INTERVAL_SECONDS = 5    # Mark price poll frequency
 MAX_WATCH_DISTANCE_PCT = 15  # Max distance to include in watchlist
 ```
 
-### Alert Types
+### Monitor Phase Alert Types
 
 1. **New Position Alert** (Scan Phase)
    - Sent when new high-priority positions are detected
    - Shows token, side, value, distance, and hunting score
 
 2. **Proximity Alert** (Monitor Phase)
-   - Sent when a watched position crosses its threshold
+   - Sent when a watched position crosses below 0.5% threshold
    - Shows current vs previous distance, liquidation price, current price
+
+3. **Critical Alert** (Monitor Phase)
+   - Sent when position crosses below 0.1% threshold (imminent liquidation)
+   - Prefix: 🚨 IMMINENT LIQUIDATION
+
+4. **Collateral Added Alert** (Monitor Phase)
+   - Sent when user adds margin and liquidation price moves to safer level
+   - Prefix: 💰 COLLATERAL ADDED
+   - Shows old vs new liq price and distance improvement
+
+5. **Partial Liquidation Alert** (Monitor Phase)
+   - Sent when position value drops >10% (partial liquidation detected)
+   - Prefix: ⚠️ PARTIAL LIQUIDATION
+   - Shows old vs new position value and reduction percentage
+
+6. **Full Liquidation Alert** (Monitor Phase)
+   - Sent when position disappears from API (fully liquidated)
+   - Prefix: 🔴 LIQUIDATED
+
+**Note:** Natural price recovery (price moving favorably without user action) does NOT trigger alerts.
 
 ### Environment Variables
 

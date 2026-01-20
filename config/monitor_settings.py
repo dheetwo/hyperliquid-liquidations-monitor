@@ -90,7 +90,7 @@ MAIN_LARGE_CAP = {"ETH"}
 MAIN_TIER1_ALTS = {"SOL", "BNB", "XRP"}
 MAIN_TIER2_ALTS = {
     "DOGE", "ADA", "AVAX", "LINK", "LTC",
-    "DOT", "MATIC", "UNI", "ATOM", "TRX", "SHIB"
+    "DOT", "MATIC", "UNI", "ATOM", "TRX", "SHIB", "HYPE"
 }
 MAIN_MID_ALTS = {
     "APT", "ARB", "OP", "SUI", "TON", "NEAR", "SEI", "TIA", "INJ",
@@ -183,18 +183,21 @@ NEW_POSITION_THRESHOLDS = {
 # For "POSITION APPROACHING LIQUIDATION" alerts during monitor phase.
 # Only triggers when position crosses below this threshold for the first time.
 
-PROXIMITY_ALERT_THRESHOLD_PCT = 5.0  # Alert when distance drops below 5%
+PROXIMITY_ALERT_THRESHOLD_PCT = 0.25  # Alert when distance drops below 0.25%
 
 # =============================================================================
-# CRITICAL ZONE MONITORING
+# HIGH-INTENSITY MONITORING & ALERTS
 # =============================================================================
-# Positions under CRITICAL_ZONE_PCT get priority monitoring with full position refresh.
-# Alert at CRITICAL_ALERT_PCT threshold.
-# Recovery alert when position goes from <CRITICAL_ZONE_PCT to >RECOVERY_PCT.
+# Positions under PROXIMITY_ALERT_THRESHOLD_PCT get high-intensity monitoring:
+# - Position data refreshed frequently to detect liq price changes (margin adds)
+# - Liq price tracked for recovery detection (manual intervention vs price movement)
+#
+# Alert at CRITICAL_ALERT_PCT threshold (imminent liquidation).
+# Recovery alert when position goes from <PROXIMITY_ALERT_THRESHOLD_PCT to >RECOVERY_PCT
+# AND liquidation price changed (indicating manual intervention).
 
-CRITICAL_ZONE_PCT = 0.2       # Positions under 0.2% get priority monitoring
-CRITICAL_ALERT_PCT = 0.1      # Alert when crossing below 0.1%
-RECOVERY_PCT = 0.5            # Alert when recovering from <0.2% to >0.5%
+CRITICAL_ALERT_PCT = 0.125    # Alert when crossing below 0.125% (imminent)
+RECOVERY_PCT = 0.5            # Recovery detection threshold
 
 # Dynamic refresh interval for critical positions
 # Scales based on number of positions to avoid rate limits
@@ -202,6 +205,25 @@ CRITICAL_REFRESH_MIN_INTERVAL = 2   # Minimum seconds (base interval)
 CRITICAL_REFRESH_MAX_INTERVAL = 5   # Maximum seconds (many positions)
 CRITICAL_REFRESH_SCALE_FACTOR = 0.3 # Seconds to add per position
 MAX_CRITICAL_POSITIONS = 30         # Max positions to track (prioritize closest)
+
+# =============================================================================
+# LIQUIDATION STATUS MONITORING
+# =============================================================================
+# Detect and alert on position state changes: collateral additions, liquidations.
+# These alerts inform about events that have occurred, not just proximity warnings.
+
+# Minimum liquidation price change (%) to detect collateral addition
+# For longs: liq price must decrease by this % (safer)
+# For shorts: liq price must increase by this % (safer)
+COLLATERAL_CHANGE_MIN_PCT = 2.0
+
+# Minimum position value drop (%) to consider a partial liquidation
+# E.g., if position drops from $5M to $4M (20% drop), it's a partial liq
+PARTIAL_LIQ_THRESHOLD_PCT = 10.0
+
+# Whether to alert on natural price recovery (price moved favorably)
+# If False, only alert when user adds collateral (liq price changes)
+ALERT_NATURAL_RECOVERY = False
 
 # =============================================================================
 # WATCHLIST SETTINGS
@@ -219,6 +241,12 @@ MAX_WATCH_DISTANCE_PCT = 5.0
 # Maximum age (minutes) for cached position data to be used as fallback
 # If rate limited, will use cached data if it's newer than this
 POSITION_CACHE_MAX_AGE_MINUTES = 30
+
+# Maximum age (hours) for cohort cache (wallet addresses)
+# Cohort membership doesn't change frequently, so we can cache it for longer.
+# Only comprehensive scans will refresh the cohort cache; normal/high-priority
+# scans will use cached data if it's fresh enough.
+COHORT_CACHE_MAX_AGE_HOURS = 24  # 24 hours
 
 # =============================================================================
 # TELEGRAM SETTINGS
