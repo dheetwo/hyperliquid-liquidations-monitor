@@ -432,14 +432,14 @@ class MonitorService:
 
         # Phase 1: High-priority (kraken + large_whale, main + xyz)
         logger.info("Phase 1/3: High-priority scan (largest traders, main exchanges)")
-        total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True, notify_cohorts=False, send_summary=True)
+        total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True, notify_cohorts=False, send_summary=False)
 
         if not self.running:
             return
 
         # Phase 2: Whale only (incremental - not re-scanning kraken/large_whale)
         logger.info("Phase 2/3: Whale scan (incremental)")
-        total, new_count = self.run_scan_phase(mode="whale-only", is_baseline=False, notify_cohorts=False, send_summary=True)
+        total, new_count = self.run_scan_phase(mode="whale-only", is_baseline=False, notify_cohorts=False, send_summary=False)
 
         if not self.running:
             return
