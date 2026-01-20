@@ -20,9 +20,9 @@ from src.pipeline import fetch_all_positions_for_address
 from src.pipeline.step3_filter import calculate_distance_to_liquidation
 from src.utils.prices import fetch_all_mark_prices_async, get_current_price
 from config.monitor_settings import (
-    CRITICAL_ZONE_PCT,
     CRITICAL_ALERT_PCT,
     RECOVERY_PCT,
+    PROXIMITY_ALERT_THRESHOLD_PCT,
     CRITICAL_REFRESH_MIN_INTERVAL,
     CRITICAL_REFRESH_MAX_INTERVAL,
     CRITICAL_REFRESH_SCALE_FACTOR,
@@ -60,10 +60,10 @@ def get_critical_refresh_interval(critical_count: int) -> float:
 
 def refresh_critical_positions(service: 'MonitorService', mark_prices: Dict) -> int:
     """
-    Refresh position data for positions in critical zone (<0.2%).
+    Refresh position data for positions in high-intensity monitoring zone.
 
-    Fetches fresh clearinghouseState for each critical position to get
-    updated liquidation prices (in case of margin changes).
+    Positions under PROXIMITY_ALERT_THRESHOLD_PCT get frequent position refresh
+    to detect liquidation price changes (margin additions, position closures).
 
     Also detects:
     - Collateral additions (liq price moves away from current price)
@@ -284,10 +284,10 @@ def run_monitor_phase(service: 'MonitorService', until: Optional[datetime] = Non
     """
     Execute the monitor phase - poll prices until specified time or next scan.
 
-    Priority monitoring for critical positions (<0.2%):
+    High-intensity monitoring for positions under PROXIMITY_ALERT_THRESHOLD_PCT:
     - Refresh position data at dynamic interval (scales with position count)
-    - Alert at 0.1% threshold (critical alert)
-    - Alert when recovering from <0.2% to >0.5% (recovery alert)
+    - Alert at CRITICAL_ALERT_PCT threshold (imminent liquidation)
+    - Recovery alert when liq price changes (manual intervention detected)
 
     Args:
         service: MonitorService instance
@@ -357,12 +357,19 @@ def run_monitor_phase(service: 'MonitorService', until: Optional[datetime] = Non
                 # Update position state
                 position.last_mark_price = current_price
                 position.last_distance_pct = new_distance
-                position.in_critical_zone = new_distance < CRITICAL_ZONE_PCT
+                now_in_critical_zone = new_distance < PROXIMITY_ALERT_THRESHOLD_PCT
+
+                # Track liq price when entering high-intensity zone (for recovery detection)
+                # Recovery alerts only fire if liq price changed (manual intervention)
+                if now_in_critical_zone and not was_in_critical_zone:
+                    position.liq_price_at_critical_entry = position.liq_price
+
+                position.in_critical_zone = now_in_critical_zone
 
                 # Determine reply_to for threading
                 reply_to = position.last_proximity_message_id or position.alert_message_id
 
-                # Check for RECOVERY: was in critical zone (<0.2%), now recovered (>0.5%)
+                # Check for RECOVERY: was in high-intensity zone, now recovered (>0.5%)
                 if (
                     was_in_critical_zone and
                     new_distance > RECOVERY_PCT
@@ -371,8 +378,8 @@ def run_monitor_phase(service: 'MonitorService', until: Optional[datetime] = Non
                     # Collateral-based: liq_price changed (user added margin)
                     # Natural: liq_price unchanged (price just moved favorably)
                     liq_price_changed = (
-                        position.previous_liq_price is not None and
-                        position.previous_liq_price != position.liq_price
+                        position.liq_price_at_critical_entry is not None and
+                        abs(position.liq_price - position.liq_price_at_critical_entry) > 0.0001
                     )
 
                     if liq_price_changed:
@@ -381,13 +388,8 @@ def run_monitor_phase(service: 'MonitorService', until: Optional[datetime] = Non
                         logger.info(
                             f"RECOVERY (collateral-based): {position.token} {position.side} "
                             f"recovered from {previous_distance:.3f}% to {new_distance:.2f}% "
-                            f"(liq price changed: {position.previous_liq_price:.4f} -> {position.liq_price:.4f})"
+                            f"(liq price changed: {position.liq_price_at_critical_entry:.4f} -> {position.liq_price:.4f})"
                         )
-                        position.alerted_critical = False
-                        position.alerted_collateral_added = False  # Reset for next potential event
-                        position.in_critical_zone = False
-                        continue  # Skip - collateral_added alert already sent
-
                     elif ALERT_NATURAL_RECOVERY:
                         # Natural price recovery - alert only if configured
                         logger.info(
@@ -402,25 +404,27 @@ def run_monitor_phase(service: 'MonitorService', until: Optional[datetime] = Non
                         )
                         if msg_id:
                             position.last_proximity_message_id = msg_id
-                            position.alerted_critical = False
-                            position.in_critical_zone = False
                             alerts_sent += 1
+                            # Log to database
                             service.db.log_alert(
                                 position_key=position.position_key,
                                 alert_type="recovery",
                                 message_id=msg_id,
                                 details=f"{previous_distance:.3f}% -> {new_distance:.2f}% (natural)"
                             )
-                        continue
                     else:
                         # Natural recovery but ALERT_NATURAL_RECOVERY is False - silent reset
                         logger.info(
-                            f"RECOVERY (natural, silent): {position.token} {position.side} "
-                            f"recovered from {previous_distance:.3f}% to {new_distance:.2f}% (no alert)"
+                            f"RECOVERY (price movement only): {position.token} {position.side} "
+                            f"recovered from {previous_distance:.3f}% to {new_distance:.2f}% - no alert"
                         )
-                        position.alerted_critical = False
-                        position.in_critical_zone = False
-                        continue  # Skip other checks for this position
+
+                    # Always reset flags on recovery (regardless of alert)
+                    position.alerted_critical = False
+                    position.alerted_collateral_added = False  # Reset for next potential event
+                    position.in_critical_zone = False
+                    position.liq_price_at_critical_entry = None
+                    continue  # Skip other checks for this position
 
                 # Check for CRITICAL alert (crossing below 0.1%)
                 if (
@@ -450,15 +454,15 @@ def run_monitor_phase(service: 'MonitorService', until: Optional[datetime] = Non
                             details=f"distance={new_distance:.3f}%"
                         )
 
-                # Check for PROXIMITY alert (crossing below 0.5%)
+                # Check for PROXIMITY alert (crossing below threshold)
                 elif (
                     not position.alerted_proximity and
-                    new_distance <= RECOVERY_PCT and
-                    (previous_distance is None or previous_distance > RECOVERY_PCT)
+                    new_distance <= PROXIMITY_ALERT_THRESHOLD_PCT and
+                    (previous_distance is None or previous_distance > PROXIMITY_ALERT_THRESHOLD_PCT)
                 ):
                     logger.info(
                         f"PROXIMITY ALERT: {position.token} {position.side} "
-                        f"at {new_distance:.2f}% (threshold: {RECOVERY_PCT}%)"
+                        f"at {new_distance:.2f}% (threshold: {PROXIMITY_ALERT_THRESHOLD_PCT}%)"
                     )
                     msg_id = service.alerts.send_proximity_alert(
                         position,

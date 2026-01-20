@@ -404,10 +404,12 @@ class MonitorService:
                     f"Rate limit protection: last scan was {elapsed:.0f}s ago, "
                     f"waiting {wait_seconds}s before starting"
                 )
+                restart_time = now + timedelta(seconds=wait_seconds)
+                restart_time_et = restart_time.astimezone(pytz.timezone("America/New_York"))
                 self.alerts.send_service_status(
                     "started",
-                    f"Rate limit cooldown: waiting {wait_seconds}s\n"
-                    f"Last scan: {last_scan.strftime('%H:%M:%S UTC')}"
+                    f"Not monitoring positions (rate limit cooldown)\n"
+                    f"Estimated restart: {restart_time_et.strftime('%H:%M:%S %Z')}"
                 )
                 time.sleep(wait_seconds)
 
@@ -430,39 +432,21 @@ class MonitorService:
 
         # Phase 1: High-priority (kraken + large_whale, main + xyz)
         logger.info("Phase 1/3: High-priority scan (largest traders, main exchanges)")
-        self.alerts.send_startup_phase_alert(
-            phase=1,
-            total_phases=3,
-            phase_name="High-priority",
-            description="Scanning kraken + large_whale cohorts\nExchanges: main, xyz"
-        )
-        total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True, notify_cohorts=True, send_summary=True)
+        total, new_count = self.run_scan_phase(mode="high-priority", is_baseline=True, notify_cohorts=False, send_summary=True)
 
         if not self.running:
             return
 
         # Phase 2: Whale only (incremental - not re-scanning kraken/large_whale)
         logger.info("Phase 2/3: Whale scan (incremental)")
-        self.alerts.send_startup_phase_alert(
-            phase=2,
-            total_phases=3,
-            phase_name="Whale",
-            description="Adding whale cohort only\nExchanges: main, xyz"
-        )
-        total, new_count = self.run_scan_phase(mode="whale-only", is_baseline=False, notify_cohorts=True, send_summary=True)
+        total, new_count = self.run_scan_phase(mode="whale-only", is_baseline=False, notify_cohorts=False, send_summary=True)
 
         if not self.running:
             return
 
         # Phase 3: Shark + remaining exchanges (incremental)
         logger.info("Phase 3/3: Shark + additional exchanges (incremental)")
-        self.alerts.send_startup_phase_alert(
-            phase=3,
-            total_phases=3,
-            phase_name="Shark + Extra Exchanges",
-            description="Adding shark cohort\nAdding exchanges: flx, vntl, hyna, km"
-        )
-        total, new_count = self.run_scan_phase(mode="shark-incremental", is_baseline=False, notify_cohorts=True, send_summary=True)
+        total, new_count = self.run_scan_phase(mode="shark-incremental", is_baseline=False, notify_cohorts=False, send_summary=True)
 
         if not self.running:
             return

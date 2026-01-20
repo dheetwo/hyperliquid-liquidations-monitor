@@ -913,23 +913,21 @@ class TelegramAlerts:
         # Convert to Eastern Time
         timestamp_et = timestamp.astimezone(EASTERN_TZ)
 
-        status_emoji = {
+        status_text = {
             "started": "Monitor service started",
             "stopped": "Monitor service stopped",
             "error": "Monitor service error",
             "scan_complete": "Scan phase complete",
         }.get(status, f"Status: {status}")
 
+        time_str = timestamp_et.strftime('%H:%M:%S %Z')
         lines = [
-            f"<b>{status_emoji}</b>",
+            f"<b>{status_text} at {time_str}</b>",
         ]
 
         if details:
             lines.append("")
             lines.append(details)
-
-        lines.append("")
-        lines.append(f"Time: {timestamp_et.strftime('%H:%M:%S %Z')}")
 
         message = "\n".join(lines)
         # Service status alerts skip rate limiting (critical operational info)

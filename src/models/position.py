@@ -87,6 +87,7 @@ class WatchedPosition:
     alerted_proximity: bool = False  # Already sent proximity alert (0.5%)
     alerted_critical: bool = False  # Already sent critical alert (0.1%)
     in_critical_zone: bool = False  # Currently in critical zone (<0.2%)
+    liq_price_at_critical_entry: float = None  # Liq price when entering critical zone (for recovery detection)
     first_seen_scan: str = None  # Timestamp of first detection
     alert_message_id: int = None  # Telegram message_id for reply threading
     last_proximity_message_id: int = None  # Last proximity/critical alert message_id
