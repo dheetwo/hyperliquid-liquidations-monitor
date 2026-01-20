@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 GRAPHQL_URL = "https://api.hyperdash.com/graphql"
 
 # Cohort groupings
-PRIORITY_COHORTS = ["kraken", "large_whale", "whale"]
-SECONDARY_COHORTS = ["shark"]
+PRIORITY_COHORTS = ["kraken", "large_whale", "whale", "rekt", "extremely_profitable"]
+SECONDARY_COHORTS = ["shark", "very_unprofitable", "very_profitable"]
 ALL_COHORTS = PRIORITY_COHORTS + SECONDARY_COHORTS
 
 COHORT_QUERY = """

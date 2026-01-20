@@ -33,9 +33,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Cohort groupings
-HIGH_PRIORITY_COHORTS = ["kraken", "large_whale"]
-NORMAL_COHORTS = ["kraken", "large_whale", "whale"]
-ALL_COHORTS = ["kraken", "large_whale", "whale", "shark"]
+HIGH_PRIORITY_COHORTS = ["kraken", "large_whale", "rekt"]
+NORMAL_COHORTS = ["kraken", "large_whale", "whale", "rekt", "extremely_profitable"]
+ALL_COHORTS = ["kraken", "large_whale", "whale", "rekt", "extremely_profitable", "shark", "very_unprofitable", "very_profitable"]
 
 # DEX/Exchange identifiers
 MAIN_DEX = ""
@@ -67,12 +67,12 @@ SCAN_MODES = {
         "dexes": CORE_DEXES,
     },
     "shark-incremental": {
-        "cohorts": ["shark"],  # New cohort
-        "dexes": ALL_DEXES,    # All exchanges (shark needs full coverage)
+        "cohorts": ["shark", "very_unprofitable", "very_profitable"],  # Secondary cohorts
+        "dexes": ALL_DEXES,    # All exchanges (secondary cohorts need full coverage)
         # Note: Also need to scan existing cohorts on new exchanges
         # This is handled by additional_scans below
         "additional_scans": [
-            # Scan kraken/large_whale/whale on the extra exchanges they missed
+            # Scan normal cohorts on the extra exchanges they missed
             {"cohorts": NORMAL_COHORTS, "dexes": ["flx", "vntl", "hyna", "km"]},
         ],
     },
@@ -80,7 +80,7 @@ SCAN_MODES = {
 
 # Legacy aliases for backward compatibility
 PRIORITY_COHORTS = NORMAL_COHORTS
-SECONDARY_COHORTS = ["shark"]
+SECONDARY_COHORTS = ["shark", "very_unprofitable", "very_profitable"]
 SUB_EXCHANGES = ["xyz", "flx", "vntl", "hyna", "km"]
 
 # Rate limiting settings (sync mode)

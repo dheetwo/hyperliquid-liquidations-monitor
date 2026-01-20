@@ -6,7 +6,34 @@ Dataclasses for position data from Hyperliquid API.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional, Set
+
+
+# Cohort category constants
+SIZE_COHORTS = {"kraken", "large_whale", "whale", "shark"}
+PNL_COHORTS = {"rekt", "very_unprofitable", "extremely_profitable", "very_profitable"}
+
+
+def format_cohorts(cohorts: Set[str]) -> str:
+    """
+    Format cohort set for display.
+
+    Shows size cohort / PNL cohort if both present.
+    Example: "kraken/rekt", "whale", "very_unprofitable"
+    """
+    if not cohorts:
+        return ""
+
+    size = [c for c in cohorts if c in SIZE_COHORTS]
+    pnl = [c for c in cohorts if c in PNL_COHORTS]
+
+    parts = []
+    if size:
+        parts.append(size[0])  # Only show first size cohort (highest priority)
+    if pnl:
+        parts.append(pnl[0])  # Only show first PNL cohort
+
+    return "/".join(parts)
 
 
 @dataclass
@@ -50,6 +77,9 @@ class WatchedPosition:
     is_isolated: bool
     hunting_score: float
 
+    # Cohort information - wallet can belong to size cohort AND/OR PNL cohort
+    cohorts: Set[str] = field(default_factory=set)
+
     # Tracking state
     last_distance_pct: float = None
     last_mark_price: float = None
@@ -60,6 +90,11 @@ class WatchedPosition:
     first_seen_scan: str = None  # Timestamp of first detection
     alert_message_id: int = None  # Telegram message_id for reply threading
     last_proximity_message_id: int = None  # Last proximity/critical alert message_id
+
+    @property
+    def cohort_display(self) -> str:
+        """Format cohorts for display in alerts."""
+        return format_cohorts(self.cohorts)
 
     @property
     def position_key(self) -> str:

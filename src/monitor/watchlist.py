@@ -78,6 +78,9 @@ def build_watchlist(filtered_positions: List[Dict]) -> Dict[str, WatchedPosition
     - Hunting score above MIN_HUNTING_SCORE
     - Notional value thresholds (varies by token and margin type)
 
+    Handles positions appearing multiple times with different cohorts by
+    combining all cohorts into a single WatchedPosition.
+
     Args:
         filtered_positions: List of position dicts from filtered CSV
 
@@ -85,9 +88,24 @@ def build_watchlist(filtered_positions: List[Dict]) -> Dict[str, WatchedPosition
         Dict mapping position_key to WatchedPosition
     """
     watchlist = {}
+    # Track cohorts per address (a wallet can belong to multiple cohorts)
+    address_cohorts: Dict[str, set] = {}
     scan_time = datetime.now(timezone.utc).isoformat()
     filtered_by_notional = 0
 
+    # First pass: collect all cohorts per address
+    for row in filtered_positions:
+        try:
+            address = row['Address']
+            cohort = row.get('Cohort', '')
+            if cohort:
+                if address not in address_cohorts:
+                    address_cohorts[address] = set()
+                address_cohorts[address].add(cohort)
+        except (KeyError, ValueError):
+            continue
+
+    # Second pass: build watchlist with combined cohorts
     for row in filtered_positions:
         try:
             # Parse required fields
@@ -101,6 +119,13 @@ def build_watchlist(filtered_positions: List[Dict]) -> Dict[str, WatchedPosition
             hunting_score = float(row['Hunting Score'])
             distance_pct = float(row['Distance to Liq (%)'])
             current_price = float(row['Current Price'])
+
+            # Build position key to check for duplicates
+            position_key = f"{address}:{token}:{exchange}:{side}"
+
+            # Skip if we already have this position (from different cohort scan)
+            if position_key in watchlist:
+                continue
 
             # Apply distance filter
             if distance_pct > MAX_WATCH_DISTANCE_PCT:
@@ -121,7 +146,10 @@ def build_watchlist(filtered_positions: List[Dict]) -> Dict[str, WatchedPosition
                 filtered_by_notional += 1
                 continue
 
-            # Create watched position
+            # Get all cohorts for this address
+            cohorts = address_cohorts.get(address, set())
+
+            # Create watched position with all cohorts
             watched = WatchedPosition(
                 address=address,
                 token=token,
@@ -131,6 +159,7 @@ def build_watchlist(filtered_positions: List[Dict]) -> Dict[str, WatchedPosition
                 position_value=position_value,
                 is_isolated=is_isolated,
                 hunting_score=hunting_score,
+                cohorts=cohorts,
                 last_distance_pct=distance_pct,
                 last_mark_price=current_price,
                 threshold_pct=get_proximity_alert_threshold(),
