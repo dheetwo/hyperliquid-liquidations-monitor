@@ -404,10 +404,12 @@ class MonitorService:
                     f"Rate limit protection: last scan was {elapsed:.0f}s ago, "
                     f"waiting {wait_seconds}s before starting"
                 )
+                restart_time = now + timedelta(seconds=wait_seconds)
+                restart_time_et = restart_time.astimezone(pytz.timezone("America/New_York"))
                 self.alerts.send_service_status(
                     "started",
-                    f"Rate limit cooldown: waiting {wait_seconds}s\n"
-                    f"Last scan: {last_scan.strftime('%H:%M:%S UTC')}"
+                    f"Not monitoring positions (rate limit cooldown)\n"
+                    f"Estimated restart: {restart_time_et.strftime('%H:%M:%S %Z')}"
                 )
                 time.sleep(wait_seconds)
 
