@@ -470,7 +470,8 @@ async def async_fetch_all_positions_for_address(
 
 async def async_fetch_all_mark_prices(
     session: aiohttp.ClientSession,
-    semaphore: asyncio.Semaphore
+    semaphore: asyncio.Semaphore,
+    dexes: List[str] = None
 ) -> Dict[str, float]:
     """
     Async version: Fetch current mark prices for all perp tokens across all exchanges.
@@ -478,10 +479,14 @@ async def async_fetch_all_mark_prices(
     Args:
         session: aiohttp ClientSession
         semaphore: Semaphore for rate limiting
+        dexes: List of exchange identifiers (default: ALL_DEXES)
 
     Returns:
         Dict mapping token symbol to mark price
     """
+    if dexes is None:
+        dexes = ALL_DEXES
+
     async def fetch_dex_prices(dex: str) -> Dict[str, float]:
         async with semaphore:
             try:
@@ -502,7 +507,7 @@ async def async_fetch_all_mark_prices(
                 return {}
 
     # Fetch all exchanges concurrently
-    tasks = [fetch_dex_prices(dex) for dex in ALL_DEXES]
+    tasks = [fetch_dex_prices(dex) for dex in dexes]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     all_prices = {}
@@ -626,10 +631,13 @@ def fetch_all_positions_async(
     ))
 
 
-def fetch_all_mark_prices_async() -> Dict[str, float]:
+def fetch_all_mark_prices_async(dexes: List[str] = None) -> Dict[str, float]:
     """
     Sync wrapper for async_fetch_all_mark_prices.
     Fetches mark prices from all exchanges concurrently.
+
+    Args:
+        dexes: List of exchange identifiers (default: ALL_DEXES)
 
     Returns:
         Dict mapping token symbol to mark price
@@ -637,7 +645,7 @@ def fetch_all_mark_prices_async() -> Dict[str, float]:
     async def _fetch():
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         async with aiohttp.ClientSession() as session:
-            return await async_fetch_all_mark_prices(session, semaphore)
+            return await async_fetch_all_mark_prices(session, semaphore, dexes)
 
     return asyncio.run(_fetch())
 
