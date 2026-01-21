@@ -8,7 +8,7 @@ Monitor publicly visible positions on Hyperdash.com and alert subscribers about 
 Provide **daily intelligence** on large positions approaching liquidation, plus **real-time alerts** when positions enter critical zones or experience liquidation events.
 
 Alert subscribers about:
-1. **Daily watchlist summaries** - Twice-daily overview of all monitored positions
+1. **Daily watchlist summaries** - Five times daily overview of all monitored positions
 2. **Critical proximity alerts** - Positions entering danger zone (<0.25%)
 3. **Collateral additions** - When users add margin to restore position health
 4. **Partial/Full liquidations** - When positions are liquidated
@@ -17,7 +17,7 @@ Alert subscribers about:
 
 | Alert | Description | When Triggered |
 |-------|-------------|----------------|
-| 📊 DAILY SUMMARY | Overview of all monitored positions | 9:00 AM & 4:00 PM EST |
+| 📊 DAILY SUMMARY | Overview of all monitored positions | 6am, 9am, 12pm, 4pm, 9pm EST |
 | 🚨 IMMINENT LIQUIDATION | Position critically close to liquidation | Distance < 0.125% |
 | ⚠️ APPROACHING LIQUIDATION | Position entering danger zone | Distance < 0.25% |
 | 💰 COLLATERAL ADDED | User added margin, position safer | Liq price moved away from current |
@@ -191,7 +191,7 @@ Results are sorted by distance to liquidation (closest first).
 **Completed:**
 - [x] Cache-based monitoring with tiered refresh (replaces scheduled scans)
 - [x] SQLite persistence for positions (survive restarts)
-- [x] Daily summary alerts at 9am & 4pm EST
+- [x] Daily summary alerts at 6am, 9am, 12pm, 4pm & 9pm EST
 - [x] Notional threshold filtering by token tier
 - [x] Position change detection (collateral adds, partial/full liquidations)
 - [x] Removed order book fetching for faster scans (~7-12 min total)
@@ -243,7 +243,7 @@ Continuous cache-based monitoring service with tiered refresh scheduling.
 │  └─────────────────────────────────────────────────────────┘   │
 │                              ↓                                  │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │ DAILY SUMMARIES (9:00 AM & 4:00 PM EST)                 │   │
+│  │ DAILY SUMMARIES (6am, 9am, 12pm, 4pm, 9pm EST)          │   │
 │  │  - Lists all monitored positions by tier                │   │
 │  │  - Shows token, side, value, distance, liq price        │   │
 │  └─────────────────────────────────────────────────────────┘   │
@@ -277,7 +277,7 @@ DISCOVERY_MIN_INTERVAL_MINUTES = 30   # Minimum between discoveries
 DISCOVERY_MAX_INTERVAL_MINUTES = 240  # Maximum (4 hours)
 
 # Daily summary times (EST)
-DAILY_SUMMARY_TIMES = [(9, 0), (16, 0)]  # 9am, 4pm
+DAILY_SUMMARY_TIMES = [(6, 0), (9, 0), (12, 0), (16, 0), (21, 0)]  # 6am, 9am, 12pm, 4pm, 9pm
 
 # Alert thresholds
 PROXIMITY_ALERT_THRESHOLD_PCT = 0.25  # Approaching liquidation
@@ -319,7 +319,7 @@ Positions must meet minimum size requirements to be monitored. Isolated position
 ### Monitor Alert Types
 
 1. **Daily Summary Alert**
-   - Sent at 9:00 AM and 4:00 PM EST
+   - Sent at 6am, 9am, 12pm, 4pm, and 9pm EST
    - Lists all monitored positions grouped by tier
    - Shows token, side, value, distance, liquidation price
 
