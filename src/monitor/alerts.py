@@ -301,7 +301,7 @@ class TelegramAlerts:
                 f"{margin_type:<{max_margin}} | "
                 f"{dist_str:<{max_dist}}"
             )
-            lines.append(f"<code>{row}</code>")
+            lines.append(row)
             # Show address link with cohort tags after
             if cohort_str:
                 lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})")
@@ -386,7 +386,7 @@ class TelegramAlerts:
                 f"{margin_type:<{max_margin}} | "
                 f"{dist_str:<{max_dist}}"
             )
-            lines.append(f"<code>{row}</code>")
+            lines.append(row)
             # Show address link with cohort tags after
             if cohort_str:
                 lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})")
@@ -1236,7 +1236,7 @@ def send_daily_summary(
         for pos, (token_display, side_char, value_str, margin_type, dist_str, addr_short, address) in zip(display_critical, formatted):
             hypurrscan_url = f"https://hypurrscan.io/address/{address}"
             row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
-            lines.append(f"<code>{row}</code>")
+            lines.append(row)
             lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> ({pos.cohort})")
         if len(critical) > 10:
             lines.append(f"... and {len(critical) - 10} more")
@@ -1268,7 +1268,7 @@ def send_daily_summary(
         for pos, (token_display, side_char, value_str, margin_type, dist_str, addr_short, address) in zip(display_high, formatted):
             hypurrscan_url = f"https://hypurrscan.io/address/{address}"
             row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
-            lines.append(f"<code>{row}</code>")
+            lines.append(row)
             lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> ({pos.cohort})")
         if len(high) > 10:
             lines.append(f"... and {len(high) - 10} more")
@@ -1302,7 +1302,7 @@ def send_daily_summary(
         for pos, (token_display, side_char, value_str, margin_type, dist_str, addr_short, address) in zip(normal_filtered, formatted):
             hypurrscan_url = f"https://hypurrscan.io/address/{address}"
             row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
-            lines.append(f"<code>{row}</code>")
+            lines.append(row)
             lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> ({pos.cohort})")
         lines.append("")
 
