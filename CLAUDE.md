@@ -5,23 +5,29 @@
 Monitor publicly visible positions on Hyperdash.com and alert subscribers about **liquidation status changes** on Hyperliquid perpetual futures.
 
 ### Core Goal
+Provide **daily intelligence** on large positions approaching liquidation, plus **real-time alerts** when positions enter critical zones or experience liquidation events.
+
 Alert subscribers about:
-1. **Imminent liquidations** - Positions approaching liquidation threshold
-2. **Collateral additions** - When users add margin to restore position health
-3. **Partial/Full liquidations** - When positions are liquidated
+1. **Daily watchlist summaries** - Twice-daily overview of all monitored positions
+2. **Critical proximity alerts** - Positions entering danger zone (<0.25%)
+3. **Collateral additions** - When users add margin to restore position health
+4. **Partial/Full liquidations** - When positions are liquidated
 
 ### Alert Types
 
 | Alert | Description | When Triggered |
 |-------|-------------|----------------|
-| 🚨 IMMINENT LIQUIDATION | Position is critically close to liquidation | Distance < 0.1% |
-| APPROACHING LIQUIDATION | Position entering danger zone | Distance < 0.5% |
+| 📊 DAILY SUMMARY | Overview of all monitored positions | 9:00 AM & 4:00 PM EST |
+| 🚨 IMMINENT LIQUIDATION | Position critically close to liquidation | Distance < 0.125% |
+| ⚠️ APPROACHING LIQUIDATION | Position entering danger zone | Distance < 0.25% |
 | 💰 COLLATERAL ADDED | User added margin, position safer | Liq price moved away from current |
 | ⚠️ PARTIAL LIQUIDATION | Position partially liquidated | Position value dropped >10% |
 | 🔴 LIQUIDATED | Position fully liquidated | Position disappeared from API |
 
 ### What We DON'T Alert On
 - **Natural price recovery** - When price moves favorably without user action (silent)
+- **New position discoveries** - Added to cache silently, shown in daily summaries
+- **Positions below notional thresholds** - Filtered by tier (BTC $100M cross, ETH $75M cross, etc.)
 
 ## Project Structure
 
@@ -35,11 +41,12 @@ hyperdash_scanner/
 │   │   └── step3_filter.py      # Step 3: Filter and score
 │   ├── monitor/                 # Monitor service
 │   │   ├── __init__.py          # Package exports
-│   │   ├── orchestrator.py      # Main MonitorService, scheduling
+│   │   ├── orchestrator.py      # Main MonitorService, tiered refresh
+│   │   ├── cache.py             # Position cache, tier scheduling
 │   │   ├── scan_phase.py        # Scan phase logic
 │   │   ├── monitor_phase.py     # Monitor phase logic
 │   │   ├── watchlist.py         # Watchlist management
-│   │   ├── alerts.py            # Telegram alert system
+│   │   ├── alerts.py            # Telegram alerts, daily summaries
 │   │   └── database.py          # SQLite persistence
 │   ├── api/                     # External API clients
 │   │   ├── __init__.py          # Package exports
@@ -87,15 +94,15 @@ hyperdash_scanner/
 **Step 2: Position Scraper** (`src/pipeline/step2_position.py`)
 - Source: `https://api.hyperliquid.xyz/info` (clearinghouseState)
 - Scans 5 exchanges per wallet: main + 4 sub-exchanges (xyz, flx, hyna, km)
-- Note: vntl excluded - private equity assets have no external price discovery for cascade detection
+- Note: vntl excluded - private equity assets have no external price discovery
 - Captures all positions with full details
 - Output: `data/raw/position_data*.csv`
 
 **Step 3: Liquidation Filter** (`src/pipeline/step3_filter.py`)
 - Filters out positions without liquidation price
 - Fetches current mark prices from all exchanges
-- Fetches L2 order books for all unique tokens
-- Calculates hunting metrics (see below)
+- Calculates distance to liquidation
+- Sorts results by distance (closest first)
 - Output: `data/processed/filtered_*.csv`
 
 ## Cohort Definitions
@@ -105,13 +112,18 @@ hyperdash_scanner/
 | kraken | $5M+ | 1 (highest) | ~65 | all |
 | large_whale | $1M-$5M | 2 | ~256 | all |
 | whale | $250K-$1M | 3 | ~280 | all |
-| rekt | Realized losses | 3 | varies | all |
+| rekt | Large realized losses | 3 | varies | all |
 | extremely_profitable | Large realized profits | 3 | varies | all |
 | very_unprofitable | Large unrealized losses | 4 | varies | all |
-| very_profitable | Realized profits | 4 | varies | all |
-| profitable | Realized profits (mid-tier) | 4 | varies | all |
-| unprofitable | Unrealized losses (mid-tier) | 4 | varies | all |
+| very_profitable | Large unrealized profits | 4 | varies | all |
+| profitable | Realized profits | 4 | varies | all |
+| unprofitable | Unrealized losses | 4 | varies | all |
 | shark | $100K-$250K | 5 (lowest) | ~1559 | all |
+
+### Wallet Filtering
+- **Minimum wallet value**: $300K total position value (skip low-value wallets)
+- **Leverage filter**: Exclude wallets with leverage ≤1.0 AND long-only bias (no liquidation risk)
+- **Short/neutral wallets**: Always included regardless of leverage (can still be liquidated)
 
 ## Exchange Coverage
 
@@ -147,14 +159,10 @@ hyperdash_scanner/
 
 ### filtered_position_data.csv
 All columns from position_data.csv plus:
-`Current Price, Distance to Liq (%), Estimated Liquidatable Value, Notional to Trigger, Est Price Impact (%), Hunting Score`
+`Current Price, Distance to Liq (%)`
 
 **Key fields:**
-- `Distance to Liq (%)` - positive = price must move against position
-- `Estimated Liquidatable Value` - USD forced to market (100% isolated, 20% cross)
-- `Notional to Trigger` - USD to push price to liquidation (lower = easier)
-- `Est Price Impact (%)` - expected slippage from liquidation (higher = more cascade potential)
-- `Hunting Score` - combined metric, sorted highest first
+- `Distance to Liq (%)` - positive = price must move against position (sorted closest first)
 
 ## Current Stats (Latest Scan)
 
@@ -175,178 +183,165 @@ All columns from position_data.csv plus:
 |--------|-------------|---------|
 | `Current Price` | Live mark price at filter time | From `allMids` API |
 | `Distance to Liq (%)` | How far price must move to trigger | `(current - liq) / current * 100` for longs |
-| `Estimated Liquidatable Value` | USD value that will be force-liquidated | Isolated: 100% notional, Cross: 20% notional |
-| `Notional to Trigger` | USD needed to push price to liquidation | Sum of order book liquidity between current and liq price |
-| `Est Price Impact (%)` | Slippage when liquidation executes | Walk order book with liquidatable value |
-| `Hunting Score` | Combined attractiveness metric | See formula below |
 
-### Hunting Score Formula
-
-```
-Hunting Score = (Est Liq Value × Est Price Impact %) / (Notional to Trigger × Distance %²)
-```
-
-**Interpretation:**
-- Higher score = better hunting target
-- Rewards: large liquidatable value, high price impact
-- Penalizes: high cost to trigger, far from liquidation
-
-**Fallback** (when order book data missing):
-```
-Hunting Score = Est Liq Value / Distance %²
-```
-
-### Notional to Trigger Calculation
-
-Walks the order book from current price to liquidation price:
-- **Long position**: Sum bids between `liq_price` and `current_price` (need to sell to push down)
-- **Short position**: Sum asks between `current_price` and `liq_price` (need to buy to push up)
-
-**Known limitation**: L2 order book data is truncated (~20-50 levels). For positions with liquidation prices far from current, the value is underestimated.
-
-### Price Impact Calculation
-
-Simulates the forced market order when liquidation triggers:
-- **Long liquidated**: Walks bids from top (forced sell)
-- **Short liquidated**: Walks asks from bottom (forced buy)
-
-Uses current book depth as proxy for liquidity at liquidation time. Extrapolates if book exhausted.
-
-### Configurable Parameters
-
-```python
-CROSS_POSITION_LIQUIDATABLE_RATIO = 0.20  # 20% of cross-margin positions liquidated
-ORDERBOOK_DELAY = 0.1                      # Rate limit for order book fetches
-```
+Results are sorted by distance to liquidation (closest first).
 
 ## Next Steps
 
 **Completed:**
-- [x] Multi-tier scan scheduling (6:30 comprehensive, :00 normal, :30 priority)
-- [x] Baseline tracking for NEW position detection
-- [x] Manual mode fallback with `--manual` flag
+- [x] Cache-based monitoring with tiered refresh (replaces scheduled scans)
+- [x] SQLite persistence for positions (survive restarts)
+- [x] Daily summary alerts at 9am & 4pm EST
+- [x] Notional threshold filtering by token tier
+- [x] Position change detection (collateral adds, partial/full liquidations)
+- [x] Removed order book fetching for faster scans (~7-12 min total)
+- [x] Wallet filtering (leverage, bias, minimum $300K value)
+- [x] Added profitable/unprofitable PnL cohorts
 
 **TODO: Improvements**
-- [ ] Extrapolate notional-to-trigger for positions far from current price
-- [ ] Add cascade detection (chain of liquidations)
+- [ ] Add cascade detection (chain of liquidations via order book)
 - [ ] Add market cap / OI percentage columns
 - [ ] WebSocket for real-time price updates (reduce API polling)
-- [ ] Position change detection (size increases, liq price changes)
 - [ ] Historical tracking of positions across scans
 
 ## Monitor Service (`src/monitor/`)
 
-Continuous monitoring service with **scheduled multi-tier scanning** (default) or manual fixed-interval mode.
+Continuous cache-based monitoring service with tiered refresh scheduling.
 
-### Scheduled Mode (Default)
-
-Time-based scan scheduling (all times EST):
-
-| Time | Scan Mode | Description |
-|------|-----------|-------------|
-| 6:30 AM | comprehensive | **Baseline scan** - full watchlist reset, alerts all qualifying positions |
-| Every hour (:00) | normal | Alerts only for NEW positions since baseline |
-| Every 30 min (:30) | high-priority | Fast scan, alerts only for NEW positions since baseline |
-
-**Example daily schedule:**
-```
-6:30 AM  - Comprehensive (new baseline for the day)
-7:00 AM  - Normal (alerts only NEW positions since 6:30)
-7:30 AM  - Priority (alerts only NEW positions since 6:30)
-8:00 AM  - Normal
-8:30 AM  - Priority
-...
-6:30 AM next day - Comprehensive (new baseline)
-```
-
-**On startup:** Immediate scan runs based on current time. If no baseline exists, first scan establishes baseline.
-
-### Manual Mode (`--manual`)
-
-Fixed interval between scans (original behavior). Every scan is treated as a baseline.
-
-### Architecture
+### Architecture: Cache-Based Monitoring
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    MONITOR SERVICE (service.py)                 │
+│                    MONITOR SERVICE (orchestrator.py)            │
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │ SCAN PHASE (scheduled or fixed interval)                │   │
-│  │  1. Run cohort scraper → data/raw/cohort_data.csv      │   │
-│  │  2. Run position scraper (mode based on schedule)       │   │
-│  │  3. Run liquidation filter                              │   │
-│  │  4. Compare with BASELINE → find NEW positions          │   │
-│  │  5. Alert if new high-priority positions found          │   │
-│  │  6. Update watchlist (merge or replace based on mode)   │   │
+│  │ INITIAL SCAN (on startup)                               │   │
+│  │  1. Load cached positions from SQLite (if fresh)        │   │
+│  │  2. Or run comprehensive scan (all cohorts, all dexes)  │   │
+│  │  3. Populate position cache with tier classification    │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                              ↓                                  │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │ MONITOR PHASE (runs until next scheduled scan)          │   │
-│  │  Loop every 5 seconds:                                  │   │
-│  │    1. Fetch all mark prices (1 API call)               │   │
-│  │    2. For each watched position:                        │   │
-│  │       - Recalculate distance to liquidation            │   │
-│  │       - If distance < threshold → ALERT                │   │
-│  │    3. Track positions already alerted (no duplicates)   │   │
+│  │ TIERED REFRESH LOOP (continuous)                        │   │
+│  │  Based on distance to liquidation:                      │   │
+│  │    - Critical (≤0.125%): ~5 req/sec continuous         │   │
+│  │    - High (0.125-0.25%): Every 2-3 seconds             │   │
+│  │    - Normal (>0.25%): Every 30 seconds                 │   │
+│  │                                                         │   │
+│  │  On each refresh:                                       │   │
+│  │    - Fetch position data from API                       │   │
+│  │    - Recalculate distance, detect state changes         │   │
+│  │    - Alert on proximity thresholds, collateral, liqs    │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                              ↓                                  │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ DISCOVERY SCHEDULER (dynamic interval)                  │   │
+│  │  - Scans for new addresses/positions                    │   │
+│  │  - Interval adapts to API pressure (30min - 4hr)       │   │
+│  │  - More critical positions = longer discovery interval  │   │
+│  │  - New positions added silently to cache                │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                              ↓                                  │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ DAILY SUMMARIES (9:00 AM & 4:00 PM EST)                 │   │
+│  │  - Lists all monitored positions by tier                │   │
+│  │  - Shows token, side, value, distance, liq price        │   │
 │  └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Baseline vs Non-Baseline Scans
+### Position Cache Tiers
 
-| Scan Type | Watchlist Behavior | Alert Comparison |
-|-----------|-------------------|------------------|
-| Baseline (comprehensive) | Full replacement | vs previous baseline |
-| Non-baseline (normal/priority) | Merge new positions | vs current baseline |
+| Tier | Distance | Refresh Rate | Purpose |
+|------|----------|--------------|---------|
+| Critical | ≤0.125% | ~5 req/sec | Imminent liquidation detection |
+| High | 0.125-0.25% | Every 2-3 sec | Approaching liquidation monitoring |
+| Normal | >0.25% | Every 30 sec | Background tracking |
 
-### Alert Thresholds (Asset-based Tiers)
-
-| Tier | Assets | Min Position | Alert Distance |
-|------|--------|--------------|----------------|
-| Tier 1 | BTC, ETH, SOL, BNB | $50M+ | 3% |
-| Tier 2 | XRP, DOGE, ADA, AVAX, LINK, LTC | $20M+ | 3% |
-| Alts | All others | $5M+ | 3% |
-| Default | Any size | Any | 1% |
+Positions are automatically promoted/demoted between tiers as distance changes.
 
 ### Configuration (`config/monitor_settings.py`)
 
 ```python
-# Scheduling (times in EST)
-COMPREHENSIVE_SCAN_HOUR = 6    # Hour of comprehensive/baseline scan
-COMPREHENSIVE_SCAN_MINUTE = 30  # Minute of comprehensive scan
+# Cache tier thresholds (distance to liquidation %)
+CACHE_TIER_CRITICAL_PCT = 0.125   # ≤0.125% = critical tier
+CACHE_TIER_HIGH_PCT = 0.25        # 0.125-0.25% = high tier
 
-# Timing
-SCAN_INTERVAL_MINUTES = 90   # Time between scans (manual mode only)
-POLL_INTERVAL_SECONDS = 5    # Mark price poll frequency
-MAX_WATCH_DISTANCE_PCT = 15  # Max distance to include in watchlist
+# Tier refresh intervals (seconds)
+CACHE_REFRESH_CRITICAL_SEC = 0.2  # ~5 req/sec
+CACHE_REFRESH_HIGH_SEC = 2.5      # Every 2-3 seconds
+CACHE_REFRESH_NORMAL_SEC = 30.0   # Every 30 seconds
+
+# Discovery scheduling
+DISCOVERY_MIN_INTERVAL_MINUTES = 30   # Minimum between discoveries
+DISCOVERY_MAX_INTERVAL_MINUTES = 240  # Maximum (4 hours)
+
+# Daily summary times (EST)
+DAILY_SUMMARY_TIMES = [(9, 0), (16, 0)]  # 9am, 4pm
+
+# Alert thresholds
+PROXIMITY_ALERT_THRESHOLD_PCT = 0.25  # Approaching liquidation
+CRITICAL_ALERT_PCT = 0.125            # Imminent liquidation
+
+# Watchlist filtering
+MAX_WATCH_DISTANCE_PCT = 5.0  # Max distance to include
+MIN_WALLET_POSITION_VALUE = 300_000  # Skip wallets below $300K total value
 ```
 
-### Monitor Phase Alert Types
+### Watchlist Notional Thresholds
 
-1. **New Position Alert** (Scan Phase)
-   - Sent when new high-priority positions are detected
-   - Shows token, side, value, distance, and hunting score
+Positions must meet minimum size requirements to be monitored. Isolated positions use 5x lower thresholds.
 
-2. **Proximity Alert** (Monitor Phase)
-   - Sent when a watched position crosses below 0.5% threshold
+**Main Exchange (Cross / Isolated):**
+
+| Tier | Tokens | Cross Threshold | Isolated Threshold |
+|------|--------|-----------------|-------------------|
+| Mega Cap | BTC | $100M | $20M |
+| Large Cap | ETH | $75M | $15M |
+| Tier 1 Alts | SOL, BNB, XRP | $25M | $5M |
+| Tier 2 Alts | DOGE, ADA, AVAX, LINK, HYPE, etc. | $10M | $2M |
+| Mid Alts | APT, ARB, OP, memes, DeFi | $5M | $1M |
+| Small Caps | Everything else | $1.5M | $300K |
+
+**XYZ Exchange (All Isolated):**
+
+| Category | Tokens | Threshold |
+|----------|--------|-----------|
+| Indices | XYZ100 | $5M |
+| Mega Equities | AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA | $3M |
+| Large Equities | AMD, NFLX, COIN, MSTR | $2M |
+| Other Equities | Default | $1M |
+| Gold | GOLD | $2.5M |
+| Oil | CL | $2M |
+
+**Other Sub-Exchanges (flx, hyna, km):** $500K flat threshold
+
+### Monitor Alert Types
+
+1. **Daily Summary Alert**
+   - Sent at 9:00 AM and 4:00 PM EST
+   - Lists all monitored positions grouped by tier
+   - Shows token, side, value, distance, liquidation price
+
+2. **Approaching Liquidation Alert**
+   - Sent when position crosses below 0.25% threshold
    - Shows current vs previous distance, liquidation price, current price
 
-3. **Critical Alert** (Monitor Phase)
-   - Sent when position crosses below 0.1% threshold (imminent liquidation)
+3. **Imminent Liquidation Alert**
+   - Sent when position crosses below 0.125% threshold
    - Prefix: 🚨 IMMINENT LIQUIDATION
 
-4. **Collateral Added Alert** (Monitor Phase)
+4. **Collateral Added Alert**
    - Sent when user adds margin and liquidation price moves to safer level
    - Prefix: 💰 COLLATERAL ADDED
    - Shows old vs new liq price and distance improvement
 
-5. **Partial Liquidation Alert** (Monitor Phase)
+5. **Partial Liquidation Alert**
    - Sent when position value drops >10% (partial liquidation detected)
    - Prefix: ⚠️ PARTIAL LIQUIDATION
    - Shows old vs new position value and reduction percentage
 
-6. **Full Liquidation Alert** (Monitor Phase)
+6. **Full Liquidation Alert**
    - Sent when position disappears from API (fully liquidated)
    - Prefix: 🔴 LIQUIDATED
 
@@ -362,30 +357,35 @@ export TELEGRAM_CHAT_ID=your_chat_id
 ### Monitor Commands
 
 ```bash
-# Start monitor with scheduled mode (default)
-# 6:30 AM comprehensive, :00 normal, :30 priority
+# Start monitor (cache-based, continuous)
 python scripts/run_monitor.py
 
-# Start with manual mode (fixed 90 min interval)
-python scripts/run_monitor.py --manual
-
-# Manual mode with custom interval
-python scripts/run_monitor.py --manual --interval 60
+# Clear database and start fresh
+python scripts/run_monitor.py --clear-db
 
 # Dry run (console alerts only, no Telegram)
 python scripts/run_monitor.py --dry-run
+
+# Custom poll interval
+python scripts/run_monitor.py --poll 10
+
+# Debug logging
+python scripts/run_monitor.py --log-level DEBUG
 
 # Test Telegram configuration
 python scripts/run_monitor.py --test-telegram
 ```
 
-## Scan Modes
+## Scan Modes (Pipeline CLI Only)
+
+These modes apply to the standalone pipeline scripts (`scan_positions.py`), not the monitor service.
+The monitor service uses cache-based continuous monitoring instead.
 
 | Mode | Cohorts | Exchanges | Use Case |
 |------|---------|-----------|----------|
 | high-priority | kraken, large_whale, rekt | main, xyz | Fast scan of largest + rekt traders |
-| normal | kraken, large_whale, whale, rekt, extremely_profitable, very_unprofitable, very_profitable | main, xyz | Default balanced scan |
-| comprehensive | all cohorts | all 6 exchanges | Full coverage, slower |
+| normal | all cohorts | main, xyz | Default balanced scan |
+| comprehensive | all cohorts | all 5 exchanges | Full coverage, slower |
 
 ## Common Commands
 
@@ -412,11 +412,11 @@ python -m src.scrapers.cohort
 python -m src.scrapers.position --mode high-priority
 python -m src.filters.liquidation
 
-# Step 4: Run continuous monitor (combines all steps)
-python scripts/run_monitor.py                       # Scheduled mode (default)
-python scripts/run_monitor.py --manual              # Manual mode, 90min interval
-python scripts/run_monitor.py --manual -i 60       # Manual mode, 60min interval
-python scripts/run_monitor.py --dry-run            # Console alerts only
+# Run continuous monitor (cache-based, replaces pipeline steps)
+python scripts/run_monitor.py              # Start monitor service
+python scripts/run_monitor.py --clear-db   # Clear database and start fresh
+python scripts/run_monitor.py --dry-run    # Console alerts only
+python scripts/run_monitor.py --poll 10    # Custom poll interval (seconds)
 ```
 
 ## Dependencies
@@ -433,47 +433,25 @@ python scripts/run_monitor.py --dry-run            # Console alerts only
 - BATCH_DELAY = 2.0s every 50 addresses
 - DEX_DELAY = 0.1s between dex queries for same address
 
-**Hyperliquid API (src/filters/liquidation.py):**
-- ORDERBOOK_DELAY = 0.1s between order book fetches
-
 **Hyperdash GraphQL:**
 - 1.0s delay between cohort requests
 - Supports pagination (500 per page)
 
-## Cascade Potential & Price Impact
+## Cascade Potential & Price Impact (Future)
 
-### Quantifying Slippage (Price Impact)
-To estimate how much a liquidation moves price:
-1. **Get order book depth** from Hyperliquid API
-2. **Liquidation = forced market order** of size ≈ position notional
-3. **Walk the book**: Sum liquidity at each price level until notional is filled
-4. **Price impact** = difference between spot and final fill price
+> **Note:** Order book fetching was removed in v2 to speed up scans (~20 min → ~30 sec for Step 3).
+> These features are planned for future implementation.
 
-```
-Example: $5M long liquidated on asset with thin book
-- Spot: $1.00
-- $2M liquidity at $0.99, $2M at $0.98, $3M at $0.97
-- Liquidation sells $5M → fills through to $0.97
-- Price impact ≈ 3%
-```
-
-### Cascade Detection
+### Cascade Detection (TODO)
 Cascades occur when one liquidation's price impact triggers another.
 
-**Algorithm:**
+**Planned algorithm:**
 1. Group positions by asset + direction (longs together, shorts together)
 2. Sort by distance to liquidation (closest first)
 3. For position A: estimate price impact if liquidated
 4. Check if that impact reaches position B's liq price
 5. If yes, add B's notional, recalculate combined impact
 6. Repeat until no more positions reached
-
-**Cascade score** = total notional of chainable liquidations
-
-### Data Needed
-- Order book depth (Hyperliquid API)
-- All positions with liq prices on same asset
-- Current spot price
 
 ## API Reference
 
@@ -528,7 +506,9 @@ query GetSizeCohort($id: String!, $limit: Int!, $offset: Int!) {
 {"type": "meta", "dex": "xyz"}  # Returns universe with onlyIsolated, maxLeverage, etc.
 ```
 
-### Hyperliquid Order Book API
+### Hyperliquid Order Book API (Not Currently Used)
+
+> **Note:** Order book fetching was removed in v2 for faster scans. API reference kept for future cascade detection.
 
 **L2 Book (aggregated depth):**
 ```python
@@ -537,39 +517,14 @@ query GetSizeCohort($id: String!, $limit: Int!, $offset: Int!) {
 # Each level: {"px": "3500.0", "sz": "100.5", "n": 5}
 ```
 
-**Price Impact Calculation:**
-```python
-def estimate_price_impact(order_book, liquidation_size, side):
-    """
-    Walk the book to estimate slippage from a liquidation.
-    - Long liquidation = market SELL → walk down bids
-    - Short liquidation = market BUY → walk up asks
-    """
-    levels = order_book["bids"] if side == "sell" else order_book["asks"]
-    remaining = liquidation_size
-    total_value = 0
-
-    for level in levels:
-        px, sz = float(level["px"]), float(level["sz"])
-        fill = min(remaining, sz * px)  # notional fillable at this level
-        total_value += fill
-        remaining -= fill
-        if remaining <= 0:
-            return (px - spot_price) / spot_price  # % impact
-
-    return None  # book exhausted before fill
-```
-
-## What Makes a Good Liquidation Target
+## Position Monitoring Criteria
 
 | Factor | Threshold | Why It Matters |
 |--------|-----------|----------------|
-| Has liquidation price | Required | No liq price = can't be hunted |
-| Liq price close to spot | ≤3% = high, ≤10% = watch | Closer = easier to trigger |
-| Large notional | ≥ $25M | Bigger price impact |
-| High % of OI | ≥ 0.025% | Liquidation moves market more |
-| High % of MC | ≥ 0.05% | Significant relative to asset value |
-| Cascade potential | Chain of positions | Triggers compound liquidations |
+| Has liquidation price | Required | No liq price = no liquidation risk |
+| Distance to liquidation | ≤5% to monitor | Closer = higher priority |
+| Position notional | Token-tier based | Large positions have market impact |
+| Margin type | Cross or Isolated | Isolated = 100% liquidated, Cross = partial |
 
 ## File Locations
 
@@ -579,12 +534,13 @@ def estimate_price_impact(order_book, liquidation_size, side):
 - `src/pipeline/step3_filter.py` - Step 3: Filter and score
 
 **Monitor Service:**
-- `src/monitor/orchestrator.py` - Main MonitorService class with scheduling
+- `src/monitor/orchestrator.py` - Main MonitorService class, tiered refresh loop
+- `src/monitor/cache.py` - CachedPosition, PositionCache, TieredRefreshScheduler, DiscoveryScheduler
 - `src/monitor/scan_phase.py` - Scan phase logic
 - `src/monitor/monitor_phase.py` - Monitor phase logic (price polling)
 - `src/monitor/watchlist.py` - Watchlist building and management
-- `src/monitor/alerts.py` - Telegram alert system
-- `src/monitor/database.py` - SQLite persistence
+- `src/monitor/alerts.py` - Telegram alert system, daily summaries
+- `src/monitor/database.py` - SQLite persistence (positions, addresses, logs)
 
 **API Clients:**
 - `src/api/hyperliquid.py` - HyperliquidAPIClient, RateLimiter
