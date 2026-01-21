@@ -306,6 +306,83 @@ class HyperliquidAPIClient:
             self.get_meta_and_asset_contexts()
         return list(self._asset_cache.keys())
 
+    def get_user_non_funding_ledger_updates(
+        self,
+        address: str,
+        start_time: int,
+        end_time: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        Fetch non-funding ledger updates for a user (deposits, withdrawals, liquidations, etc).
+
+        Args:
+            address: Ethereum address (0x...)
+            start_time: Start timestamp in milliseconds (inclusive)
+            end_time: End timestamp in milliseconds (inclusive), defaults to now
+
+        Returns:
+            List of ledger update dicts. Liquidation events have type="liquidation"
+            with fields: accountValue, leverageType, liquidatedPositions
+        """
+        if end_time is None:
+            end_time = int(time.time() * 1000)
+
+        logger.debug(f"Fetching ledger updates for {address[:10]}... ({start_time} to {end_time})")
+
+        try:
+            data = self._post({
+                "type": "userNonFundingLedgerUpdates",
+                "user": address,
+                "startTime": start_time,
+                "endTime": end_time
+            })
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Failed to get ledger updates for {address}: {e}")
+            return []
+
+    def check_for_liquidation_event(
+        self,
+        address: str,
+        coin: str,
+        start_time: int,
+        end_time: Optional[int] = None
+    ) -> Optional[Dict]:
+        """
+        Check if a liquidation event occurred for a specific coin in a time window.
+
+        Args:
+            address: Ethereum address (0x...)
+            coin: Asset symbol (e.g., "BTC", "ETH")
+            start_time: Start timestamp in milliseconds
+            end_time: End timestamp in milliseconds (defaults to now)
+
+        Returns:
+            Liquidation event dict if found, None otherwise.
+            Event contains: type, accountValue, leverageType, liquidatedPositions
+        """
+        updates = self.get_user_non_funding_ledger_updates(address, start_time, end_time)
+
+        for update in updates:
+            # Check if this is a liquidation event
+            delta = update.get("delta", {})
+            if delta.get("type") == "liquidation":
+                # Check if the liquidation involves the coin we're looking for
+                liquidated_positions = delta.get("liquidatedPositions", [])
+                for liq_pos in liquidated_positions:
+                    if liq_pos.get("coin") == coin:
+                        logger.info(f"Found liquidation event for {coin} on {address[:10]}")
+                        return {
+                            "type": "liquidation",
+                            "time": update.get("time"),
+                            "hash": update.get("hash"),
+                            "account_value": delta.get("accountValue"),
+                            "leverage_type": delta.get("leverageType"),
+                            "liquidated_position": liq_pos
+                        }
+
+        return None
+
     def get_l2_book(self, coin: str) -> Optional[L2Book]:
         """
         Fetch L2 order book for an asset.
