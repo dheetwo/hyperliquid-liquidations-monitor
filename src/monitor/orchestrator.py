@@ -224,9 +224,17 @@ class MonitorService:
             logger.error(f"Cohort fetch error: {e}")
             raise
 
-        # Build address list with cohorts
+        # Build address list with cohorts (already in priority order from fetch_cohorts)
         addresses = [(t.address, t.cohort) for t in traders]
-        unique_addresses = list(set(addresses))
+
+        # Dedupe by address, keeping first occurrence (highest-priority cohort)
+        seen = set()
+        unique_addresses = []
+        for addr, cohort in addresses:
+            if addr not in seen:
+                seen.add(addr)
+                unique_addresses.append((addr, cohort))
+
         logger.info(f"Unique addresses to scan: {len(unique_addresses)}")
 
         # Step 2: Fetch mark prices
