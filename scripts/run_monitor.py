@@ -37,7 +37,7 @@ sys.path.insert(0, str(project_root))
 
 from src.monitor import MonitorService
 from src.monitor.alerts import send_test_alert
-from src.monitor.database import SQLiteLoggingHandler
+from src.monitor.database import MonitorDatabase, SQLiteLoggingHandler
 from config.monitor_settings import (
     POLL_INTERVAL_SECONDS,
     LOG_LEVEL,
@@ -141,6 +141,7 @@ Examples:
   python scripts/run_monitor.py                # Start monitor
   python scripts/run_monitor.py --dry-run      # Console alerts only
   python scripts/run_monitor.py --test-telegram # Test Telegram setup
+  python scripts/run_monitor.py --clear-db     # Clear database and start fresh
         """
     )
 
@@ -168,6 +169,12 @@ Examples:
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
         default=LOG_LEVEL,
         help=f'Log level (default: {LOG_LEVEL})'
+    )
+
+    parser.add_argument(
+        '--clear-db',
+        action='store_true',
+        help='Clear all database tables (watchlist, baseline, caches) before starting'
     )
 
     args = parser.parse_args()
@@ -214,6 +221,21 @@ Examples:
             print("Set environment variable or use --dry-run for console output.")
             print("To set: export TELEGRAM_CHAT_ID=your_chat_id")
             sys.exit(1)
+
+    # Clear database if requested
+    if args.clear_db:
+        print("\nClearing database...")
+        db = MonitorDatabase()
+        db.clear_watchlist()
+        db.clear_baseline()
+        db.clear_cohort_cache()
+        db.clear_position_cache()
+        db.clear_known_addresses()
+        # Also clear history/logs if desired for full reset
+        db.prune_old_data(history_days=0, alert_days=0, log_days=0)
+        db.vacuum()
+        print("Database cleared successfully.")
+        logger.info("Database cleared via --clear-db flag")
 
     # Create and run monitor service
     try:

@@ -23,8 +23,6 @@ from src.pipeline.step3_filter import (
     filter_positions,
     calculate_distance_to_liquidation,
     calculate_estimated_liquidatable_value,
-    calculate_notional_to_trigger,
-    calculate_price_impact,
     CROSS_POSITION_LIQUIDATABLE_RATIO,
 )
 from src.utils.prices import (
@@ -38,7 +36,5 @@ __all__ = [
     "get_current_price",
     "fetch_all_mark_prices",
     "calculate_estimated_liquidatable_value",
-    "calculate_notional_to_trigger",
-    "calculate_price_impact",
     "CROSS_POSITION_LIQUIDATABLE_RATIO",
 ]

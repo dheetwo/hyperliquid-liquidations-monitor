@@ -24,15 +24,55 @@ logger = logging.getLogger(__name__)
 
 GRAPHQL_URL = "https://api.hyperdash.com/graphql"
 
-# Cohort groupings
-PRIORITY_COHORTS = ["kraken", "large_whale", "whale", "rekt", "extremely_profitable"]
-SECONDARY_COHORTS = ["shark", "very_unprofitable", "very_profitable"]
+# Cohort groupings by type
+SIZE_COHORTS = ["kraken", "large_whale", "whale", "shark"]
+PNL_COHORTS = ["extremely_profitable", "very_profitable", "profitable", "unprofitable", "very_unprofitable", "rekt"]
+
+# Priority ordering for scans
+PRIORITY_COHORTS = ["kraken", "large_whale", "whale", "rekt", "extremely_profitable", "very_unprofitable", "very_profitable", "profitable", "unprofitable"]
+SECONDARY_COHORTS = ["shark"]
 ALL_COHORTS = PRIORITY_COHORTS + SECONDARY_COHORTS
 
-COHORT_QUERY = """
+SIZE_COHORT_QUERY = """
 query GetSizeCohort($id: String!, $limit: Int!, $offset: Int!, $sortBy: CohortTraderSortInput) {
   analytics {
     sizeCohort(id: $id) {
+      cohortInfo {
+        id
+        label
+        range
+        emoji
+      }
+      totalTraders
+      totalAccountValue
+      topTraders(limit: $limit, offset: $offset, sortBy: $sortBy) {
+        totalCount
+        hasMore
+        traders {
+          address
+          accountValue
+          perpPnl
+          totalNotional
+          longNotional
+          shortNotional
+          positions {
+            coin
+            size
+            notionalSize
+            unrealizedPnl
+            entryPrice
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+PNL_COHORT_QUERY = """
+query GetPnlCohort($id: String!, $limit: Int!, $offset: Int!, $sortBy: CohortTraderSortInput) {
+  analytics {
+    pnlCohort(id: $id) {
       cohortInfo {
         id
         label
@@ -72,7 +112,7 @@ def fetch_cohort_data(cohort_id: str, page_size: int = 500) -> List[Dict[str, An
     Automatically paginates to fetch all traders.
 
     Args:
-        cohort_id: Cohort identifier (kraken, large_whale, whale, shark)
+        cohort_id: Cohort identifier (kraken, large_whale, whale, shark, or PnL-based)
         page_size: Number of traders to fetch per request
 
     Returns:
@@ -83,6 +123,12 @@ def fetch_cohort_data(cohort_id: str, page_size: int = 500) -> List[Dict[str, An
         "Origin": "https://hyperdash.com",
         "Referer": "https://hyperdash.com/"
     }
+
+    # Determine query type based on cohort
+    is_pnl_cohort = cohort_id in PNL_COHORTS
+    query = PNL_COHORT_QUERY if is_pnl_cohort else SIZE_COHORT_QUERY
+    operation_name = "GetPnlCohort" if is_pnl_cohort else "GetSizeCohort"
+    response_field = "pnlCohort" if is_pnl_cohort else "sizeCohort"
 
     all_traders = []
     offset = 0
@@ -103,9 +149,9 @@ def fetch_cohort_data(cohort_id: str, page_size: int = 500) -> List[Dict[str, An
             response = requests.post(
                 GRAPHQL_URL,
                 json={
-                    "query": COHORT_QUERY,
+                    "query": query,
                     "variables": variables,
-                    "operationName": "GetSizeCohort"
+                    "operationName": operation_name
                 },
                 headers=headers,
                 timeout=30
@@ -118,7 +164,7 @@ def fetch_cohort_data(cohort_id: str, page_size: int = 500) -> List[Dict[str, An
                 logger.error(f"GraphQL errors for {cohort_id}: {data['errors']}")
                 break
 
-            cohort_data = data.get("data", {}).get("analytics", {}).get("sizeCohort", {})
+            cohort_data = data.get("data", {}).get("analytics", {}).get(response_field, {})
             top_traders = cohort_data.get("topTraders", {})
             traders = top_traders.get("traders", [])
             has_more = top_traders.get("hasMore", False)

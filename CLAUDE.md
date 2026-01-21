@@ -104,12 +104,14 @@ hyperdash_scanner/
 |--------|-------------|----------|---------------|------------|
 | kraken | $5M+ | 1 (highest) | ~65 | all |
 | large_whale | $1M-$5M | 2 | ~256 | all |
-| whale | $250K-$1M | 3 | ~280 | normal, comprehensive |
-| rekt | Realized losses | 3 | varies | all (high-priority, normal, comprehensive) |
-| extremely_profitable | Large realized profits | 3 | varies | normal, comprehensive |
-| shark | $100K-$250K | 4 | ~1559 | comprehensive only |
-| very_unprofitable | Large unrealized losses | 5 (lowest) | varies | comprehensive only |
-| very_profitable | Realized profits | 5 | varies | comprehensive only |
+| whale | $250K-$1M | 3 | ~280 | all |
+| rekt | Realized losses | 3 | varies | all |
+| extremely_profitable | Large realized profits | 3 | varies | all |
+| very_unprofitable | Large unrealized losses | 4 | varies | all |
+| very_profitable | Realized profits | 4 | varies | all |
+| profitable | Realized profits (mid-tier) | 4 | varies | all |
+| unprofitable | Unrealized losses (mid-tier) | 4 | varies | all |
+| shark | $100K-$250K | 5 (lowest) | ~1559 | all |
 
 ## Exchange Coverage
 
@@ -382,7 +384,7 @@ python scripts/run_monitor.py --test-telegram
 | Mode | Cohorts | Exchanges | Use Case |
 |------|---------|-----------|----------|
 | high-priority | kraken, large_whale, rekt | main, xyz | Fast scan of largest + rekt traders |
-| normal | kraken, large_whale, whale, rekt, extremely_profitable | main, xyz | Default balanced scan |
+| normal | kraken, large_whale, whale, rekt, extremely_profitable, very_unprofitable, very_profitable | main, xyz | Default balanced scan |
 | comprehensive | all cohorts | all 6 exchanges | Full coverage, slower |
 
 ## Common Commands

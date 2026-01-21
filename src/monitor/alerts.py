@@ -301,7 +301,7 @@ class TelegramAlerts:
                 f"{margin_type:<{max_margin}} | "
                 f"{dist_str:<{max_dist}}"
             )
-            lines.append(f"<code>{row}</code>")
+            lines.append(row)
             # Show address link with cohort tags after
             if cohort_str:
                 lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})")
@@ -386,7 +386,7 @@ class TelegramAlerts:
                 f"{margin_type:<{max_margin}} | "
                 f"{dist_str:<{max_dist}}"
             )
-            lines.append(f"<code>{row}</code>")
+            lines.append(row)
             # Show address link with cohort tags after
             if cohort_str:
                 lines.append(f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})")
@@ -463,6 +463,13 @@ class TelegramAlerts:
         addr = position.address
         addr_display = f"{addr[:6]}...{addr[-4:]}"
 
+        # Build token display with exchange prefix if not main
+        exchange = getattr(position, 'exchange', 'main')
+        if exchange and exchange != 'main':
+            token_display = f"{exchange}:{position.token}"
+        else:
+            token_display = position.token
+
         # Build address line with cohort tags after
         if cohort_str:
             addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
@@ -470,9 +477,9 @@ class TelegramAlerts:
             addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
 
         lines = [
-            "APPROACHING LIQUIDATION",
+            "🟠 APPROACHING LIQUIDATION",
             "",
-            f"{position.token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             addr_line,
             "",
             f"Liquidation Distance: {previous_distance:.2f}% -> <b>{position.last_distance_pct:.2f}%</b>",
@@ -541,6 +548,13 @@ class TelegramAlerts:
         addr = position.address
         addr_display = f"{addr[:6]}...{addr[-4:]}"
 
+        # Build token display with exchange prefix if not main
+        exchange = getattr(position, 'exchange', 'main')
+        if exchange and exchange != 'main':
+            token_display = f"{exchange}:{position.token}"
+        else:
+            token_display = position.token
+
         # Build address line with cohort tags after
         if cohort_str:
             addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
@@ -550,7 +564,7 @@ class TelegramAlerts:
         lines = [
             "🚨 IMMINENT LIQUIDATION",
             "",
-            f"{position.token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             addr_line,
             "",
             f"Liquidation Distance: {previous_distance:.3f}% -> <b>{position.last_distance_pct:.3f}%</b>",
@@ -612,6 +626,13 @@ class TelegramAlerts:
         addr = position.address
         addr_display = f"{addr[:6]}...{addr[-4:]}"
 
+        # Build token display with exchange prefix if not main
+        exchange = getattr(position, 'exchange', 'main')
+        if exchange and exchange != 'main':
+            token_display = f"{exchange}:{position.token}"
+        else:
+            token_display = position.token
+
         # Build address line with cohort tags after
         if cohort_str:
             addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
@@ -621,7 +642,7 @@ class TelegramAlerts:
         lines = [
             "✅ POSITION RECOVERED",
             "",
-            f"{position.token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             addr_line,
             "",
             f"Liquidation Distance: {previous_distance:.3f}% -> <b>{position.last_distance_pct:.2f}%</b>",
@@ -664,50 +685,28 @@ class TelegramAlerts:
         Returns:
             message_id if sent successfully, None otherwise
         """
-        if alert_time is None:
-            alert_time = datetime.now(timezone.utc)
-
-        alert_time_et = alert_time.astimezone(EASTERN_TZ)
+        # Build token display with exchange prefix if not main
+        exchange = getattr(position, 'exchange', 'main')
+        if exchange and exchange != 'main':
+            token_display = f"{exchange}:{position.token}"
+        else:
+            token_display = position.token
 
         side_str = "L" if position.side == "Long" else "S"
         margin_type = "Iso" if position.is_isolated else "Cross"
-        cohort_str = position.cohort_display if hasattr(position, 'cohort_display') else ""
 
         if position.position_value >= 1_000_000:
             value_str = f"${position.position_value / 1_000_000:.1f}M"
         else:
             value_str = f"${position.position_value / 1_000:.0f}K"
 
-        def format_price(p: float) -> str:
-            if p >= 1000:
-                return f"${p:,.0f}"
-            elif p >= 1:
-                return f"${p:.2f}"
-            else:
-                return f"${p:.6f}"
-
-        # Calculate how much safer the liq price is now
-        liq_change_pct = abs(new_liq_price - old_liq_price) / old_liq_price * 100
-
-        hypurrscan_url = f"https://hypurrscan.io/address/{position.address}"
         addr = position.address
-        addr_display = f"{addr[:6]}...{addr[-4:]}"
-
-        if cohort_str:
-            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
-        else:
-            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
+        hypurrscan_url = f"https://hypurrscan.io/address/{addr}"
 
         lines = [
-            "💰 COLLATERAL ADDED",
-            "",
-            f"{position.token} | {side_str} | {value_str} | {margin_type}",
-            addr_line,
-            "",
-            f"Liq Price: {format_price(old_liq_price)} -> {format_price(new_liq_price)} ({liq_change_pct:.1f}% safer)",
-            f"Distance: {old_distance:.2f}% -> <b>{new_distance:.2f}%</b>",
-            "",
-            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
+            f"💰 COLLATERAL ADDED on {token_display}: Liq Distance: {old_distance:.2f}% → {new_distance:.2f}%",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
+            f"<a href=\"{hypurrscan_url}\">{addr[:6]}...{addr[-4:]}</a>",
         ]
 
         message = "\n".join(lines)
@@ -742,22 +741,13 @@ class TelegramAlerts:
         Returns:
             message_id if sent successfully, None otherwise
         """
-        if alert_time is None:
-            alert_time = datetime.now(timezone.utc)
-
-        alert_time_et = alert_time.astimezone(EASTERN_TZ)
-
-        side_str = "L" if position.side == "Long" else "S"
-        margin_type = "Iso" if position.is_isolated else "Cross"
-        cohort_str = position.cohort_display if hasattr(position, 'cohort_display') else ""
-
         def format_value(v: float) -> str:
+            # Round down to nearest 10k
+            v = (v // 10_000) * 10_000
             if v >= 1_000_000:
                 return f"${v / 1_000_000:.1f}M"
-            elif v >= 1_000:
-                return f"${v / 1_000:.0f}K"
             else:
-                return f"${v:.0f}"
+                return f"${v / 1_000:.0f}K"
 
         def format_price(p: float) -> str:
             if p >= 1000:
@@ -768,51 +758,31 @@ class TelegramAlerts:
                 return f"${p:.6f}"
 
         hypurrscan_url = f"https://hypurrscan.io/address/{position.address}"
-        addr = position.address
-        addr_display = f"{addr[:6]}...{addr[-4:]}"
+        addr_display = f"{position.address[:6]}...{position.address[-4:]}"
 
-        if cohort_str:
-            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
+        # Build token display with exchange prefix if not main
+        exchange = getattr(position, 'exchange', 'main')
+        if exchange and exchange != 'main':
+            token_display = f"{exchange}:{position.token}"
         else:
-            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
+            token_display = position.token
 
-        old_value_str = format_value(old_value)
+        liq_str = format_price(position.liq_price) if position.liq_price else ""
+        side_str = "L" if position.side == "Long" else "S"
+        margin_type = "Iso" if position.is_isolated else "Cross"
 
         if liquidation_type == "full":
-            emoji = "🔴"
-            title = "LIQUIDATED"
-            value_change = f"{old_value_str} -> <b>$0</b>"
-            detail_line = "Position fully liquidated"
+            lines = [
+                f"🔴 {format_value(old_value)} FULL LIQUIDATION on {token_display} at {liq_str}",
+                f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            ]
         else:
-            emoji = "⚠️"
-            title = "PARTIAL LIQUIDATION"
-            reduction_pct = (old_value - new_value) / old_value * 100
-            value_change = f"{old_value_str} -> <b>{format_value(new_value)}</b>"
-            detail_line = f"Position reduced by {reduction_pct:.0f}%"
-
-        lines = [
-            f"{emoji} {title}",
-            "",
-            f"{position.token} | {side_str} | {old_value_str} | {margin_type}",
-            addr_line,
-            "",
-            f"Position Value: {value_change}",
-            detail_line,
-        ]
-
-        if last_distance is not None:
-            lines.append(f"Last distance: {last_distance:.3f}%")
-
-        # Show liq price and current price (like imminent liquidation alert)
-        if position.liq_price and current_price:
-            lines.append(f"Liq. Price: {format_price(position.liq_price)} | Final Price: {format_price(current_price)}")
-        elif position.liq_price:
-            lines.append(f"Liq. Price: {format_price(position.liq_price)}")
-
-        lines.extend([
-            "",
-            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
-        ])
+            liquidated_amount = old_value - new_value
+            lines = [
+                f"⚠️ {format_value(liquidated_amount)} PARTIAL LIQUIDATION on {token_display} at {liq_str}",
+                f"{token_display} | {side_str} | → {format_value(new_value)} | {margin_type}",
+                f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            ]
 
         message = "\n".join(lines)
 
@@ -898,6 +868,7 @@ class TelegramAlerts:
         mark_price: float,
         position_value: float,
         is_isolated: bool = False,
+        exchange: str = "main",
         alert_time: datetime = None
     ) -> Optional[int]:
         """
@@ -912,12 +883,13 @@ class TelegramAlerts:
             mark_price: Current mark price
             position_value: Position value in USD
             is_isolated: Whether isolated margin
+            exchange: Exchange name (default: "main")
             alert_time: Alert timestamp
 
         Returns:
             message_id if sent successfully, None otherwise
         """
-        position_key = f"{address}:{token}:main:{side}"
+        position_key = f"{address}:{token}:{exchange}:{side}"
         if not self._can_alert_position(position_key):
             logger.debug(f"Proximity alert for {token} skipped (cooldown)")
             return None
@@ -929,6 +901,12 @@ class TelegramAlerts:
 
         side_str = "L" if side == "Long" else "S"
         margin_type = "Iso" if is_isolated else "Cross"
+
+        # Build token display with exchange prefix if not main
+        if exchange and exchange != "main":
+            token_display = f"{exchange}:{token}"
+        else:
+            token_display = token
 
         if position_value >= 1_000_000:
             value_str = f"${position_value / 1_000_000:.1f}M"
@@ -947,9 +925,9 @@ class TelegramAlerts:
         addr_display = f"{address[:6]}...{address[-4:]}"
 
         lines = [
-            "APPROACHING LIQUIDATION",
+            "🟠 APPROACHING LIQUIDATION",
             "",
-            f"{token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
             "",
             f"Liquidation Distance: <b>{distance_pct:.2f}%</b>",
@@ -976,6 +954,7 @@ class TelegramAlerts:
         mark_price: float,
         position_value: float,
         is_isolated: bool = False,
+        exchange: str = "main",
         alert_time: datetime = None
     ) -> Optional[int]:
         """
@@ -990,6 +969,7 @@ class TelegramAlerts:
             mark_price: Current mark price
             position_value: Position value in USD
             is_isolated: Whether isolated margin
+            exchange: Exchange name (default: "main")
             alert_time: Alert timestamp
 
         Returns:
@@ -1002,6 +982,12 @@ class TelegramAlerts:
 
         side_str = "L" if side == "Long" else "S"
         margin_type = "Iso" if is_isolated else "Cross"
+
+        # Build token display with exchange prefix if not main
+        if exchange and exchange != "main":
+            token_display = f"{exchange}:{token}"
+        else:
+            token_display = token
 
         if position_value >= 1_000_000:
             value_str = f"${position_value / 1_000_000:.1f}M"
@@ -1022,7 +1008,7 @@ class TelegramAlerts:
         lines = [
             "🚨 IMMINENT LIQUIDATION",
             "",
-            f"{token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
             "",
             f"Liquidation Distance: <b>{distance_pct:.3f}%</b>",
@@ -1044,6 +1030,7 @@ class TelegramAlerts:
         mark_price: float,
         position_value: float,
         is_isolated: bool = False,
+        exchange: str = "main",
         alert_time: datetime = None
     ) -> Optional[int]:
         """
@@ -1058,6 +1045,7 @@ class TelegramAlerts:
             mark_price: Current mark price
             position_value: Position value in USD
             is_isolated: Whether isolated margin
+            exchange: Exchange name (default: "main")
             alert_time: Alert timestamp
 
         Returns:
@@ -1070,6 +1058,12 @@ class TelegramAlerts:
 
         side_str = "L" if side == "Long" else "S"
         margin_type = "Iso" if is_isolated else "Cross"
+
+        # Build token display with exchange prefix if not main
+        if exchange and exchange != "main":
+            token_display = f"{exchange}:{token}"
+        else:
+            token_display = token
 
         if position_value >= 1_000_000:
             value_str = f"${position_value / 1_000_000:.1f}M"
@@ -1090,7 +1084,7 @@ class TelegramAlerts:
         lines = [
             "✅ POSITION RECOVERED",
             "",
-            f"{token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
             "",
             f"Liquidation Distance: <b>{distance_pct:.2f}%</b>",
@@ -1151,7 +1145,10 @@ class TelegramAlerts:
 def send_daily_summary(
     position_cache: "PositionCache",
     alerts: TelegramAlerts,
-    discovery_scheduler: "DiscoveryScheduler"
+    discovery_scheduler: "DiscoveryScheduler",
+    scheduled_hour: int = 7,
+    scheduled_minute: int = 0,
+    scan_stats: Dict[str, int] = None
 ) -> Optional[int]:
     """
     Send daily watchlist summary to Telegram.
@@ -1162,6 +1159,9 @@ def send_daily_summary(
         position_cache: PositionCache with current positions
         alerts: TelegramAlerts instance
         discovery_scheduler: DiscoveryScheduler for discovery interval info
+        scheduled_hour: Hour of scheduled summary (24h format)
+        scheduled_minute: Minute of scheduled summary
+        scan_stats: Filter statistics from last scan
 
     Returns:
         message_id if sent successfully, None otherwise
@@ -1189,58 +1189,135 @@ def send_daily_summary(
     high = positions_by_tier['high']
     normal = positions_by_tier['normal']
 
-    # Build message
-    lines = [
-        "LIQUIDATION WATCHLIST SUMMARY",
-        f"{now.strftime('%Y-%m-%d %I:%M %p')} EST",
-        "",
-    ]
+    def format_token_with_exchange(token: str, exchange: str) -> str:
+        """Add exchange prefix for sub-exchanges, stripping any existing prefix first."""
+        # Strip existing exchange prefix if present (handles corrupted data like "flx:XMR")
+        known_exchanges = {"xyz", "flx", "hyna", "km"}
+        if ":" in token:
+            prefix, rest = token.split(":", 1)
+            if prefix in known_exchanges:
+                token = rest  # Use the part after the prefix
 
-    # Critical section
+        if exchange != "main":
+            return f"{exchange}:{token}"
+        return token
+
+    # Build header with scheduled time (e.g., "9:00 AM WATCHLIST")
+    period = "AM" if scheduled_hour < 12 else "PM"
+    display_hour = scheduled_hour if scheduled_hour <= 12 else scheduled_hour - 12
+    if display_hour == 0:
+        display_hour = 12
+    header = f"{display_hour}:{scheduled_minute:02d} {period} WATCHLIST"
+
+    lines = []
+
+    # Critical section - always show header
+    lines.append("🔴 CRITICAL ZONE (≤0.125%)")
     if critical:
-        lines.append(f"🔴 CRITICAL ZONE (≤0.125%): {len(critical)}")
-        for pos in critical[:10]:  # Limit to 10
+        display_critical = critical[:10]
+
+        # Pre-compute formatted values for column alignment
+        formatted = []
+        for pos in display_critical:
+            token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
+            margin_type = "Iso" if pos.leverage_type == "Isolated" or pos.exchange != "main" else "Cross"
+            dist_str = f"{pos.distance_pct:.3f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
-            lines.append(f"  • {pos.token} {side_char} {value_str} @ {pos.distance_pct:.3f}%")
-            lines.append(f"    {addr_short}")
-        if len(critical) > 10:
-            lines.append(f"  ... and {len(critical) - 10} more")
-        lines.append("")
+            formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
 
-    # High section
+        # Find max widths for each column
+        max_token = max(len(f[0]) for f in formatted)
+        max_value = max(len(f[2]) for f in formatted)
+        max_margin = max(len(f[3]) for f in formatted)
+        max_dist = max(len(f[4]) for f in formatted)
+
+        for pos, (token_display, side_char, value_str, margin_type, dist_str, addr_short, address) in zip(display_critical, formatted):
+            hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+            row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
+            lines.append(row)
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> ({pos.cohort})")
+        if len(critical) > 10:
+            lines.append(f"... and {len(critical) - 10} more")
+    else:
+        lines.append("-")
+
+    # High section - always show header
+    lines.append("🟠 HIGH PRIORITY (≤0.25%)")
     if high:
-        lines.append(f"🟠 HIGH PRIORITY (0.125-0.25%): {len(high)}")
-        for pos in high[:10]:  # Limit to 10
+        display_high = high[:10]
+
+        # Pre-compute formatted values for column alignment
+        formatted = []
+        for pos in display_high:
+            token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
-            lines.append(f"  • {pos.token} {side_char} {value_str} @ {pos.distance_pct:.3f}%")
+            margin_type = "Iso" if pos.leverage_type == "Isolated" or pos.exchange != "main" else "Cross"
+            dist_str = f"{pos.distance_pct:.3f}%"
+            addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
+            formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
+
+        # Find max widths for each column
+        max_token = max(len(f[0]) for f in formatted)
+        max_value = max(len(f[2]) for f in formatted)
+        max_margin = max(len(f[3]) for f in formatted)
+        max_dist = max(len(f[4]) for f in formatted)
+
+        for pos, (token_display, side_char, value_str, margin_type, dist_str, addr_short, address) in zip(display_high, formatted):
+            hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+            row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
+            lines.append(row)
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> ({pos.cohort})")
         if len(high) > 10:
-            lines.append(f"  ... and {len(high) - 10} more")
+            lines.append(f"... and {len(high) - 10} more")
+    else:
+        lines.append("-")
+
+    # Normal section - show positions ≤3.5% with single line format
+    # Filter out positions >3.5% as they're not worth actively monitoring
+    normal_filtered = [p for p in normal if p.distance_pct is not None and p.distance_pct <= 3.5]
+
+    if normal_filtered:
+        lines.append("🟢 MONITORING")
+
+        # Pre-compute formatted values for column alignment
+        formatted = []
+        for pos in normal_filtered:
+            token_display = format_token_with_exchange(pos.token, pos.exchange)
+            value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
+            side_char = "L" if pos.side == "Long" else "S"
+            margin_type = "Iso" if pos.leverage_type == "Isolated" or pos.exchange != "main" else "Cross"
+            dist_str = f"{pos.distance_pct:.2f}%"
+            addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
+            formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
+
+        # Find max widths for each column
+        max_token = max(len(f[0]) for f in formatted)
+        max_value = max(len(f[2]) for f in formatted)
+        max_margin = max(len(f[3]) for f in formatted)
+        max_dist = max(len(f[4]) for f in formatted)
+
+        for pos, (token_display, side_char, value_str, margin_type, dist_str, addr_short, address) in zip(normal_filtered, formatted):
+            hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+            row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
+            lines.append(row)
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> ({pos.cohort})")
         lines.append("")
 
-    # Normal section - aggregate by token
-    if normal:
-        lines.append(f"🟢 MONITORING: {len(normal)} positions >0.25%")
-        token_summary = defaultdict(lambda: {"count": 0, "value": 0})
-        for pos in normal:
-            token_summary[pos.token]["count"] += 1
-            token_summary[pos.token]["value"] += pos.position_value
+    # Add scan statistics after positions
+    monitoring_count = len(critical) + len(high) + len(normal_filtered)
+    total = scan_stats.get('total_positions', 0) if scan_stats else 0
 
-        # Sort by total value, show top 10
-        sorted_tokens = sorted(token_summary.items(), key=lambda x: -x[1]["value"])[:10]
-        for token, data in sorted_tokens:
-            value_str = f"${data['value'] / 1_000_000:.1f}M" if data['value'] >= 1_000_000 else f"${data['value'] / 1_000:.0f}K"
-            lines.append(f"  • {token}: {data['count']} pos, {value_str}")
-        if len(token_summary) > 10:
-            lines.append(f"  ... and {len(token_summary) - 10} more tokens")
-        lines.append("")
+    if total > 0:
+        lines.append(f"📊 Scanned {total:,} positions, monitoring {monitoring_count}")
+    else:
+        lines.append(f"📊 Monitoring {monitoring_count}")
+    lines.append("")
 
-    # Footer
-    total = len(position_cache.positions)
-    discovery_interval = discovery_scheduler.get_discovery_interval_minutes()
-    lines.append(f"Cache: {total} total | Discovery interval: {discovery_interval}min")
+    # Add header at the end
+    lines.append(header)
 
     message = "\n".join(lines)
     return alerts._send_message(message)

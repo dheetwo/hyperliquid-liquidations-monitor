@@ -164,7 +164,7 @@ def get_current_price(token: str, exchange: str, mark_prices: Dict[str, float]) 
 
     Args:
         token: Token symbol (e.g., "BTC", "TSLA")
-        exchange: Exchange name ("main", "xyz", "flx", "vntl", "hyna", "km")
+        exchange: Exchange name ("main", "xyz", "flx", "hyna", "km")
         mark_prices: Dict of all mark prices
 
     Returns:
