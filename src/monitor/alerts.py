@@ -664,50 +664,28 @@ class TelegramAlerts:
         Returns:
             message_id if sent successfully, None otherwise
         """
-        if alert_time is None:
-            alert_time = datetime.now(timezone.utc)
-
-        alert_time_et = alert_time.astimezone(EASTERN_TZ)
+        # Build token display with exchange prefix if not main
+        exchange = getattr(position, 'exchange', 'main')
+        if exchange and exchange != 'main':
+            token_display = f"{exchange}:{position.token}"
+        else:
+            token_display = position.token
 
         side_str = "L" if position.side == "Long" else "S"
         margin_type = "Iso" if position.is_isolated else "Cross"
-        cohort_str = position.cohort_display if hasattr(position, 'cohort_display') else ""
 
         if position.position_value >= 1_000_000:
             value_str = f"${position.position_value / 1_000_000:.1f}M"
         else:
             value_str = f"${position.position_value / 1_000:.0f}K"
 
-        def format_price(p: float) -> str:
-            if p >= 1000:
-                return f"${p:,.0f}"
-            elif p >= 1:
-                return f"${p:.2f}"
-            else:
-                return f"${p:.6f}"
-
-        # Calculate how much safer the liq price is now
-        liq_change_pct = abs(new_liq_price - old_liq_price) / old_liq_price * 100
-
-        hypurrscan_url = f"https://hypurrscan.io/address/{position.address}"
         addr = position.address
-        addr_display = f"{addr[:6]}...{addr[-4:]}"
-
-        if cohort_str:
-            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
-        else:
-            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
+        hypurrscan_url = f"https://hypurrscan.io/address/{addr}"
 
         lines = [
-            "💰 COLLATERAL ADDED",
-            "",
-            f"{position.token} | {side_str} | {value_str} | {margin_type}",
-            addr_line,
-            "",
-            f"Liq Price: {format_price(old_liq_price)} -> {format_price(new_liq_price)} ({liq_change_pct:.1f}% safer)",
-            f"Distance: {old_distance:.2f}% -> <b>{new_distance:.2f}%</b>",
-            "",
-            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
+            f"💰 COLLATERAL ADDED on {token_display}: Liq Distance: {old_distance:.2f}% → {new_distance:.2f}%",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
+            f"<a href=\"{hypurrscan_url}\">{addr[:6]}...{addr[-4:]}</a>",
         ]
 
         message = "\n".join(lines)
@@ -742,22 +720,13 @@ class TelegramAlerts:
         Returns:
             message_id if sent successfully, None otherwise
         """
-        if alert_time is None:
-            alert_time = datetime.now(timezone.utc)
-
-        alert_time_et = alert_time.astimezone(EASTERN_TZ)
-
-        side_str = "L" if position.side == "Long" else "S"
-        margin_type = "Iso" if position.is_isolated else "Cross"
-        cohort_str = position.cohort_display if hasattr(position, 'cohort_display') else ""
-
         def format_value(v: float) -> str:
+            # Round down to nearest 10k
+            v = (v // 10_000) * 10_000
             if v >= 1_000_000:
                 return f"${v / 1_000_000:.1f}M"
-            elif v >= 1_000:
-                return f"${v / 1_000:.0f}K"
             else:
-                return f"${v:.0f}"
+                return f"${v / 1_000:.0f}K"
 
         def format_price(p: float) -> str:
             if p >= 1000:
@@ -768,51 +737,31 @@ class TelegramAlerts:
                 return f"${p:.6f}"
 
         hypurrscan_url = f"https://hypurrscan.io/address/{position.address}"
-        addr = position.address
-        addr_display = f"{addr[:6]}...{addr[-4:]}"
+        addr_display = f"{position.address[:6]}...{position.address[-4:]}"
 
-        if cohort_str:
-            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
+        # Build token display with exchange prefix if not main
+        exchange = getattr(position, 'exchange', 'main')
+        if exchange and exchange != 'main':
+            token_display = f"{exchange}:{position.token}"
         else:
-            addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
+            token_display = position.token
 
-        old_value_str = format_value(old_value)
+        liq_str = format_price(position.liq_price) if position.liq_price else ""
+        side_str = "L" if position.side == "Long" else "S"
+        margin_type = "Iso" if position.is_isolated else "Cross"
 
         if liquidation_type == "full":
-            emoji = "🔴"
-            title = "LIQUIDATED"
-            value_change = f"{old_value_str} -> <b>$0</b>"
-            detail_line = "Position fully liquidated"
+            lines = [
+                f"🔴 {format_value(old_value)} FULL LIQUIDATION on {token_display} at {liq_str}",
+                f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            ]
         else:
-            emoji = "⚠️"
-            title = "PARTIAL LIQUIDATION"
-            reduction_pct = (old_value - new_value) / old_value * 100
-            value_change = f"{old_value_str} -> <b>{format_value(new_value)}</b>"
-            detail_line = f"Position reduced by {reduction_pct:.0f}%"
-
-        lines = [
-            f"{emoji} {title}",
-            "",
-            f"{position.token} | {side_str} | {old_value_str} | {margin_type}",
-            addr_line,
-            "",
-            f"Position Value: {value_change}",
-            detail_line,
-        ]
-
-        if last_distance is not None:
-            lines.append(f"Last distance: {last_distance:.3f}%")
-
-        # Show liq price and current price (like imminent liquidation alert)
-        if position.liq_price and current_price:
-            lines.append(f"Liq. Price: {format_price(position.liq_price)} | Final Price: {format_price(current_price)}")
-        elif position.liq_price:
-            lines.append(f"Liq. Price: {format_price(position.liq_price)}")
-
-        lines.extend([
-            "",
-            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
-        ])
+            liquidated_amount = old_value - new_value
+            lines = [
+                f"⚠️ {format_value(liquidated_amount)} PARTIAL LIQUIDATION on {token_display} at {liq_str}",
+                f"{token_display} | {side_str} | → {format_value(new_value)} | {margin_type}",
+                f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            ]
 
         message = "\n".join(lines)
 
