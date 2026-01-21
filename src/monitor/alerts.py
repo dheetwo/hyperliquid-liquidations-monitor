@@ -1192,55 +1192,98 @@ def send_daily_summary(
     # Build message
     lines = [
         "LIQUIDATION WATCHLIST SUMMARY",
-        f"{now.strftime('%Y-%m-%d %I:%M %p')} EST",
+        f"{now.strftime('%Y-%m-%d %I:%M:%S %p')} EST",
         "",
     ]
 
-    # Critical section
+    # Critical section - table format
     if critical:
         lines.append(f"🔴 CRITICAL ZONE (≤0.125%): {len(critical)}")
-        for pos in critical[:10]:  # Limit to 10
+        display_critical = critical[:10]
+
+        # Pre-compute formatted values for column alignment
+        formatted = []
+        for pos in display_critical:
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
+            margin_type = "Iso" if pos.leverage_type == "Isolated" else "Cross"
+            dist_str = f"{pos.distance_pct:.3f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
-            lines.append(f"  • {pos.token} {side_char} {value_str} @ {pos.distance_pct:.3f}%")
-            lines.append(f"    {addr_short}")
+            formatted.append((pos.token, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
+
+        # Find max widths for each column
+        max_token = max(len(f[0]) for f in formatted)
+        max_value = max(len(f[2]) for f in formatted)
+        max_margin = max(len(f[3]) for f in formatted)
+        max_dist = max(len(f[4]) for f in formatted)
+
+        for token, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
+            row = f"{token:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
+            lines.append(f"<code>{row}</code>")
+            hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a>")
         if len(critical) > 10:
-            lines.append(f"  ... and {len(critical) - 10} more")
+            lines.append(f"... and {len(critical) - 10} more")
         lines.append("")
 
-    # High section
+    # High section - table format
     if high:
         lines.append(f"🟠 HIGH PRIORITY (0.125-0.25%): {len(high)}")
-        for pos in high[:10]:  # Limit to 10
+        display_high = high[:10]
+
+        # Pre-compute formatted values for column alignment
+        formatted = []
+        for pos in display_high:
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
-            lines.append(f"  • {pos.token} {side_char} {value_str} @ {pos.distance_pct:.3f}%")
+            margin_type = "Iso" if pos.leverage_type == "Isolated" else "Cross"
+            dist_str = f"{pos.distance_pct:.3f}%"
+            addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
+            formatted.append((pos.token, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
+
+        # Find max widths for each column
+        max_token = max(len(f[0]) for f in formatted)
+        max_value = max(len(f[2]) for f in formatted)
+        max_margin = max(len(f[3]) for f in formatted)
+        max_dist = max(len(f[4]) for f in formatted)
+
+        for token, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
+            row = f"{token:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
+            lines.append(f"<code>{row}</code>")
+            hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a>")
         if len(high) > 10:
-            lines.append(f"  ... and {len(high) - 10} more")
+            lines.append(f"... and {len(high) - 10} more")
         lines.append("")
 
-    # Normal section - aggregate by token
-    if normal:
-        lines.append(f"🟢 MONITORING: {len(normal)} positions >0.25%")
-        token_summary = defaultdict(lambda: {"count": 0, "value": 0})
-        for pos in normal:
-            token_summary[pos.token]["count"] += 1
-            token_summary[pos.token]["value"] += pos.position_value
+    # Normal section - show positions ≤3.5% with table format
+    # Filter out positions >3.5% as they're not worth actively monitoring
+    normal_filtered = [p for p in normal if p.distance_pct is not None and p.distance_pct <= 3.5]
 
-        # Sort by total value, show top 10
-        sorted_tokens = sorted(token_summary.items(), key=lambda x: -x[1]["value"])[:10]
-        for token, data in sorted_tokens:
-            value_str = f"${data['value'] / 1_000_000:.1f}M" if data['value'] >= 1_000_000 else f"${data['value'] / 1_000:.0f}K"
-            lines.append(f"  • {token}: {data['count']} pos, {value_str}")
-        if len(token_summary) > 10:
-            lines.append(f"  ... and {len(token_summary) - 10} more tokens")
-        lines.append("")
+    if normal_filtered:
+        lines.append(f"🟢 MONITORING: {len(normal_filtered)} positions (0.25-3.5%)")
 
-    # Footer
-    total = len(position_cache.positions)
-    discovery_interval = discovery_scheduler.get_discovery_interval_minutes()
-    lines.append(f"Cache: {total} total | Discovery interval: {discovery_interval}min")
+        # Pre-compute formatted values for column alignment
+        formatted = []
+        for pos in normal_filtered:
+            value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
+            side_char = "L" if pos.side == "Long" else "S"
+            margin_type = "Iso" if pos.leverage_type == "Isolated" else "Cross"
+            dist_str = f"{pos.distance_pct:.2f}%"
+            addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
+            formatted.append((pos.token, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
+
+        # Find max widths for each column
+        max_token = max(len(f[0]) for f in formatted)
+        max_value = max(len(f[2]) for f in formatted)
+        max_margin = max(len(f[3]) for f in formatted)
+        max_dist = max(len(f[4]) for f in formatted)
+
+        for token, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
+            row = f"{token:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
+            lines.append(f"<code>{row}</code>")
+            hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a>")
 
     message = "\n".join(lines)
     return alerts._send_message(message)
