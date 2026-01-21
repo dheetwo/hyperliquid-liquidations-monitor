@@ -70,6 +70,9 @@ class CachedPosition:
     # Tracking
     is_in_watchlist: bool = False
 
+    # Distance tracking for alerts (shows change since last daily summary)
+    distance_at_last_summary: Optional[float] = None
+
     @classmethod
     def from_position_dict(cls, pos: dict, cohort: str, mark_price: float) -> "CachedPosition":
         """
@@ -149,6 +152,7 @@ class CachedPosition:
             'last_price_update': self.last_price_update.isoformat(),
             'created_at': self.created_at.isoformat(),
             'is_in_watchlist': self.is_in_watchlist,
+            'distance_at_last_summary': self.distance_at_last_summary,
         }
 
     @classmethod
@@ -176,6 +180,7 @@ class CachedPosition:
             last_price_update=datetime.fromisoformat(d['last_price_update']) if isinstance(d['last_price_update'], str) else d['last_price_update'],
             created_at=datetime.fromisoformat(d['created_at']) if isinstance(d['created_at'], str) else d['created_at'],
             is_in_watchlist=d.get('is_in_watchlist', False),
+            distance_at_last_summary=d.get('distance_at_last_summary'),
         )
 
     def update_price(self, mark_price: float):
