@@ -11,7 +11,7 @@ from typing import List, Optional, Set
 
 # Cohort category constants
 SIZE_COHORTS = {"kraken", "large_whale", "whale", "shark"}
-PNL_COHORTS = {"rekt", "very_unprofitable", "extremely_profitable", "very_profitable"}
+PNL_COHORTS = {"rekt", "very_unprofitable", "extremely_profitable", "very_profitable", "profitable", "unprofitable"}
 
 
 def format_cohorts(cohorts: Set[str]) -> str:

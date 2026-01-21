@@ -333,21 +333,35 @@ class MonitorService:
 
         scan_start = datetime.now(timezone.utc)
 
-        # Step 1: Fetch all cohorts
+        # Step 1: Fetch all cohorts and filter by minimum position value and leverage
         logger.info("Step 1: Fetching cohort data...")
         try:
             traders = fetch_cohorts(ALL_COHORTS, delay=1.0)
+            total_traders = len(traders)
+
+            # Filter traders:
+            # 1. Must have position value >= MIN_WALLET_POSITION_VALUE
+            # 2. Skip long-only wallets with leverage <= 1.0 (no liquidation risk)
+            #    Keep short/neutral wallets even at low leverage (shorts can still be liquidated)
+            def passes_filters(t):
+                if t.position_value < MIN_WALLET_POSITION_VALUE:
+                    return False
+                # Long-only wallets with leverage <= 1.0 can't be liquidated
+                if t.leverage <= 1.0 and t.perp_bias.startswith("Long"):
+                    return False
+                return True
+
+            traders = [t for t in traders if passes_filters(t)]
+            filtered_out = total_traders - len(traders)
+
+            # Save only filtered traders to CSV
             save_cohort_csv(traders, COHORT_DATA_PATH)
-            logger.info(f"Fetched {len(traders)} traders from {len(ALL_COHORTS)} cohorts")
+            logger.info(f"Fetched {total_traders} traders, filtered {filtered_out} "
+                       f"(below ${MIN_WALLET_POSITION_VALUE/1_000:.0f}K or low-leverage long), "
+                       f"saved {len(traders)}")
         except Exception as e:
             logger.error(f"Cohort fetch error: {e}")
             raise
-
-        # Filter traders by minimum position value (saves API calls)
-        total_traders = len(traders)
-        traders = [t for t in traders if t.position_value >= MIN_WALLET_POSITION_VALUE]
-        filtered_out = total_traders - len(traders)
-        logger.info(f"Filtered wallets: {filtered_out} below ${MIN_WALLET_POSITION_VALUE/1_000_000:.2f}M threshold, {len(traders)} remaining")
 
         # Build address list with cohorts (already in priority order from fetch_cohorts)
         addresses = [(t.address, t.cohort) for t in traders]
@@ -483,6 +497,19 @@ class MonitorService:
 
         # Record scan time
         self.db.set_last_scan_time(scan_start)
+
+        # Prune old data immediately after initial scan
+        logger.info("Step 6: Pruning old database data...")
+        try:
+            deleted = self.db.prune_old_data()
+            stale_count = self.db.delete_stale_positions(CACHE_PRUNE_AGE_HOURS)
+            logger.info(f"Pruned: {deleted.get('position_history', 0)} history, "
+                       f"{deleted.get('alert_log', 0)} alerts, "
+                       f"{deleted.get('service_logs', 0)} logs, "
+                       f"{stale_count} stale positions")
+            self._last_prune_time = time.time()
+        except Exception as e:
+            logger.warning(f"Failed to prune old data: {e}")
 
         scan_duration = (datetime.now(timezone.utc) - scan_start).total_seconds()
         tier_counts = self.position_cache.get_tier_counts()
@@ -704,8 +731,15 @@ class MonitorService:
             # Fetch current cohorts
             traders = fetch_cohorts(ALL_COHORTS, delay=1.0)
 
-            # Filter traders by minimum position value (saves API calls)
-            traders = [t for t in traders if t.position_value >= MIN_WALLET_POSITION_VALUE]
+            # Filter traders (same criteria as initial scan)
+            def passes_filters(t):
+                if t.position_value < MIN_WALLET_POSITION_VALUE:
+                    return False
+                if t.leverage <= 1.0 and t.perp_bias.startswith("Long"):
+                    return False
+                return True
+
+            traders = [t for t in traders if passes_filters(t)]
             current_addresses = [(t.address, t.cohort) for t in traders]
 
             # Find new addresses
