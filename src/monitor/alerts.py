@@ -1152,7 +1152,7 @@ def send_daily_summary(
 
     # Critical section - single line per position
     if critical:
-        lines.append(f"🔴 CRITICAL ZONE (≤0.125%): {len(critical)}")
+        lines.append("🔴 CRITICAL ZONE (≤0.125%)")
         display_critical = critical[:10]
 
         # Pre-compute formatted values for column alignment
@@ -1178,11 +1178,10 @@ def send_daily_summary(
             lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> <code>{row}</code>")
         if len(critical) > 10:
             lines.append(f"... and {len(critical) - 10} more")
-        lines.append("")
 
     # High section - single line per position
     if high:
-        lines.append(f"🟠 HIGH PRIORITY (0.125-0.25%): {len(high)}")
+        lines.append("🟠 HIGH PRIORITY (≤0.25%)")
         display_high = high[:10]
 
         # Pre-compute formatted values for column alignment
@@ -1208,14 +1207,13 @@ def send_daily_summary(
             lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> <code>{row}</code>")
         if len(high) > 10:
             lines.append(f"... and {len(high) - 10} more")
-        lines.append("")
 
     # Normal section - show positions ≤3.5% with single line format
     # Filter out positions >3.5% as they're not worth actively monitoring
     normal_filtered = [p for p in normal if p.distance_pct is not None and p.distance_pct <= 3.5]
 
     if normal_filtered:
-        lines.append(f"🟢 MONITORING: {len(normal_filtered)} positions (0.25-3.5%)")
+        lines.append("🟢 MONITORING")
 
         # Pre-compute formatted values for column alignment
         formatted = []
