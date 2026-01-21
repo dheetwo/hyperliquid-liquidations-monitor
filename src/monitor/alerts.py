@@ -1168,10 +1168,11 @@ def send_daily_summary(
     """
     from collections import defaultdict
     from .cache import PositionCache, DiscoveryScheduler
+    from config.monitor_settings import get_watchlist_threshold
 
     now = datetime.now(EASTERN_TZ)
 
-    # Group positions by tier
+    # Group positions by tier (with threshold filtering)
     positions_by_tier = {
         'critical': [],
         'high': [],
@@ -1179,6 +1180,12 @@ def send_daily_summary(
     }
 
     for pos in position_cache.positions.values():
+        # Filter by notional threshold before adding to tier
+        # Sub-exchanges are always isolated, regardless of leverage_type
+        is_isolated = pos.leverage_type.lower() == "isolated" or pos.exchange != "main"
+        threshold = get_watchlist_threshold(pos.token, pos.exchange, is_isolated)
+        if pos.position_value < threshold:
+            continue  # Skip positions below threshold
         positions_by_tier[pos.refresh_tier].append(pos)
 
     # Sort each tier by distance
@@ -1222,7 +1229,7 @@ def send_daily_summary(
             token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
-            margin_type = "Iso" if pos.leverage_type == "Isolated" or pos.exchange != "main" else "Cross"
+            margin_type = "Iso" if pos.leverage_type.lower() == "isolated" or pos.exchange != "main" else "Cross"
             dist_str = f"{pos.distance_pct:.3f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
             formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
@@ -1254,7 +1261,7 @@ def send_daily_summary(
             token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
-            margin_type = "Iso" if pos.leverage_type == "Isolated" or pos.exchange != "main" else "Cross"
+            margin_type = "Iso" if pos.leverage_type.lower() == "isolated" or pos.exchange != "main" else "Cross"
             dist_str = f"{pos.distance_pct:.3f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
             formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
@@ -1288,7 +1295,7 @@ def send_daily_summary(
             token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
-            margin_type = "Iso" if pos.leverage_type == "Isolated" or pos.exchange != "main" else "Cross"
+            margin_type = "Iso" if pos.leverage_type.lower() == "isolated" or pos.exchange != "main" else "Cross"
             dist_str = f"{pos.distance_pct:.2f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
             formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
