@@ -11,7 +11,7 @@ Architecture:
   - High (0.125-0.25%): Every 2-3 seconds
   - Normal (>0.25%): Every 30 seconds
 - Dynamic discovery scans for new addresses (frequency based on API pressure)
-- Two daily summaries at 7am and 4pm EST
+- Daily summary at 6am EST
 - No intraday "new position" alerts - quiet backend updates
 """
 
@@ -117,7 +117,7 @@ class MonitorService:
     - Initial comprehensive scan to populate cache
     - Continuous tiered refresh based on liquidation distance
     - Dynamic discovery for new positions
-    - Two daily summaries at 7am and 4pm EST
+    - Daily summary at 6am EST
     """
 
     def __init__(
@@ -965,6 +965,11 @@ class MonitorService:
                     f"Positions: {len(self.position_cache.positions)}\n"
                     f"Critical: {tier_counts['critical']} | High: {tier_counts['high']} | Normal: {tier_counts['normal']}"
                 )
+
+            # Send startup watchlist summary (same format as daily summary)
+            logger.info("Sending startup watchlist summary...")
+            now_est = datetime.now(EST)
+            self._send_daily_summary(now_est.hour, now_est.minute)
 
             # Enter main loop
             self._run_main_loop()
