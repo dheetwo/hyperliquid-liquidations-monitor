@@ -606,6 +606,8 @@ class MonitorService:
         if not to_refresh:
             return
 
+        positions_to_remove = []
+
         for position_key in to_refresh:
             pos = self.position_cache.positions.get(position_key)
             if not pos:
@@ -621,6 +623,7 @@ class MonitorService:
                 )
 
                 # Find matching position - raw_positions is List[(position_dict, exchange_name)]
+                position_found = False
                 for position_data, exchange_name in raw_positions:
                     # Parse raw API data into Position object
                     fresh_pos = parse_position(
@@ -635,9 +638,39 @@ class MonitorService:
 
                     fresh_key = f"{fresh_pos.address}:{fresh_pos.token}:{fresh_pos.exchange}:{fresh_pos.side}"
                     if fresh_key == position_key:
+                        position_found = True
                         # Update cached position
                         price = get_current_price(fresh_pos.token, fresh_pos.exchange, mark_prices)
                         if price and price > 0:
+                            # Check for partial liquidation (position value dropped significantly)
+                            old_position_value = pos.position_value
+                            new_position_value = fresh_pos.position_value
+
+                            if old_position_value > 0 and new_position_value > 0:
+                                value_drop_pct = (old_position_value - new_position_value) / old_position_value
+                                # If value dropped more than 10%, might be partial liquidation
+                                if value_drop_pct >= 0.10:
+                                    # Check if this is in critical zone (likely liquidation vs voluntary close)
+                                    is_critical = pos.distance_pct is not None and pos.distance_pct <= CRITICAL_ZONE_PCT
+                                    if is_critical:
+                                        logger.warning(
+                                            f"PARTIAL LIQUIDATION: {pos.token} {pos.side} "
+                                            f"value dropped {value_drop_pct*100:.1f}% "
+                                            f"(${old_position_value/1e6:.2f}M -> ${new_position_value/1e6:.2f}M)"
+                                        )
+                                        is_isolated = pos.leverage_type.lower() == 'isolated' or pos.exchange != 'main'
+                                        self.alerts.send_liquidation_alert_simple(
+                                            token=pos.token,
+                                            side=pos.side,
+                                            address=pos.address,
+                                            position_value=old_position_value,
+                                            liq_price=pos.liq_price or 0,
+                                            liquidation_type="partial",
+                                            new_value=new_position_value,
+                                            is_isolated=is_isolated,
+                                            exchange=pos.exchange,
+                                        )
+
                             # Update position data
                             pos.size = fresh_pos.size
                             pos.leverage = fresh_pos.leverage
@@ -653,15 +686,46 @@ class MonitorService:
                             # Persist update
                             self.position_cache.update_position(pos)
                         break
-                else:
-                    # Position not found - might be closed
-                    logger.debug(f"Position {position_key} not found in refresh, may be closed")
+
+                # Position not found - check if it was liquidated
+                if not position_found:
+                    # Only alert if the position was in critical zone (high probability of liquidation)
+                    was_critical = pos.distance_pct is not None and pos.distance_pct <= CRITICAL_ZONE_PCT
+                    if was_critical:
+                        logger.warning(
+                            f"FULL LIQUIDATION: {pos.token} {pos.side} position disappeared "
+                            f"(was ${pos.position_value/1e6:.2f}M at {pos.distance_pct:.3f}%)"
+                        )
+                        is_isolated = pos.leverage_type.lower() == 'isolated' or pos.exchange != 'main'
+                        self.alerts.send_liquidation_alert_simple(
+                            token=pos.token,
+                            side=pos.side,
+                            address=pos.address,
+                            position_value=pos.position_value,
+                            liq_price=pos.liq_price or 0,
+                            liquidation_type="full",
+                            is_isolated=is_isolated,
+                            exchange=pos.exchange,
+                        )
+                    else:
+                        logger.info(f"Position {position_key} closed (was at {pos.distance_pct:.2f}% - likely voluntary)")
+
+                    # Mark for removal from cache
+                    positions_to_remove.append(position_key)
 
                 self.refresh_scheduler.mark_refreshed(position_key)
 
             except Exception as e:
                 logger.warning(f"Failed to refresh {position_key}: {e}")
                 self.refresh_scheduler.mark_refreshed(position_key)  # Mark to avoid immediate retry
+
+        # Remove liquidated/closed positions from cache
+        for key in positions_to_remove:
+            self.position_cache.remove_position(key)
+            # Also clean up alert state
+            if key in self._alerted_positions:
+                del self._alerted_positions[key]
+            logger.info(f"Removed position from cache: {key}")
 
     def _check_proximity_alerts(self):
         """Check positions for proximity alerts and send notifications."""
