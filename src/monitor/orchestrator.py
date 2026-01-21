@@ -36,6 +36,8 @@ from src.pipeline import (
     parse_position,
     ALL_COHORTS,
     ALL_DEXES,
+    SIZE_COHORTS,
+    PNL_COHORTS,
 )
 from src.pipeline.step3_filter import calculate_distance_to_liquidation
 from src.utils.prices import get_current_price
@@ -371,13 +373,33 @@ class MonitorService:
         # Build address list with cohorts (already in priority order from fetch_cohorts)
         addresses = [(t.address, t.cohort) for t in traders]
 
-        # Dedupe by address, keeping first occurrence (highest-priority cohort)
-        seen = set()
-        unique_addresses = []
+        # Build map of address -> all cohorts (wallets can be in both size AND pnl cohorts)
+        address_cohorts: Dict[str, List[str]] = {}
         for addr, cohort in addresses:
-            if addr not in seen:
-                seen.add(addr)
-                unique_addresses.append((addr, cohort))
+            if addr not in address_cohorts:
+                address_cohorts[addr] = []
+            if cohort not in address_cohorts[addr]:
+                address_cohorts[addr].append(cohort)
+
+        # Merge cohorts: combine pnl cohort + size cohort into display string
+        # e.g., "profitable shark", "rekt kraken", or just "whale" if no pnl cohort
+        def merge_cohorts(cohorts: List[str]) -> str:
+            size_cohort = None
+            pnl_cohort = None
+            for c in cohorts:
+                if c in SIZE_COHORTS and size_cohort is None:
+                    size_cohort = c
+                elif c in PNL_COHORTS and pnl_cohort is None:
+                    pnl_cohort = c
+            if size_cohort and pnl_cohort:
+                return f"{pnl_cohort} {size_cohort}"
+            return size_cohort or pnl_cohort or cohorts[0]
+
+        # Dedupe and merge cohort info
+        unique_addresses = []
+        for addr, cohorts in address_cohorts.items():
+            merged_cohort = merge_cohorts(cohorts)
+            unique_addresses.append((addr, merged_cohort))
 
         logger.info(f"Unique addresses to scan: {len(unique_addresses)}")
 
