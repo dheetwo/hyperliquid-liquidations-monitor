@@ -1166,9 +1166,9 @@ def send_daily_summary(
 
     lines = []
 
-    # Critical section - single line per position
+    # Critical section - always show header
+    lines.append("🔴 CRITICAL ZONE (≤0.125%)")
     if critical:
-        lines.append("🔴 CRITICAL ZONE (≤0.125%)")
         display_critical = critical[:10]
 
         # Pre-compute formatted values for column alignment
@@ -1188,16 +1188,19 @@ def send_daily_summary(
         max_margin = max(len(f[3]) for f in formatted)
         max_dist = max(len(f[4]) for f in formatted)
 
-        for token_display, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
+        for pos, (token_display, side_char, value_str, margin_type, dist_str, addr_short, address) in zip(display_critical, formatted):
             hypurrscan_url = f"https://hypurrscan.io/address/{address}"
             row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
-            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> <code>{row}</code>")
+            lines.append(f"<code>{row}</code>")
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> ({pos.cohort})")
         if len(critical) > 10:
             lines.append(f"... and {len(critical) - 10} more")
+    else:
+        lines.append("-")
 
-    # High section - single line per position
+    # High section - always show header
+    lines.append("🟠 HIGH PRIORITY (≤0.25%)")
     if high:
-        lines.append("🟠 HIGH PRIORITY (≤0.25%)")
         display_high = high[:10]
 
         # Pre-compute formatted values for column alignment
@@ -1217,12 +1220,15 @@ def send_daily_summary(
         max_margin = max(len(f[3]) for f in formatted)
         max_dist = max(len(f[4]) for f in formatted)
 
-        for token_display, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
+        for pos, (token_display, side_char, value_str, margin_type, dist_str, addr_short, address) in zip(display_high, formatted):
             hypurrscan_url = f"https://hypurrscan.io/address/{address}"
             row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
-            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> <code>{row}</code>")
+            lines.append(f"<code>{row}</code>")
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> ({pos.cohort})")
         if len(high) > 10:
             lines.append(f"... and {len(high) - 10} more")
+    else:
+        lines.append("-")
 
     # Normal section - show positions ≤3.5% with single line format
     # Filter out positions >3.5% as they're not worth actively monitoring
@@ -1248,10 +1254,11 @@ def send_daily_summary(
         max_margin = max(len(f[3]) for f in formatted)
         max_dist = max(len(f[4]) for f in formatted)
 
-        for token_display, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
+        for pos, (token_display, side_char, value_str, margin_type, dist_str, addr_short, address) in zip(normal_filtered, formatted):
             hypurrscan_url = f"https://hypurrscan.io/address/{address}"
             row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
-            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> <code>{row}</code>")
+            lines.append(f"<code>{row}</code>")
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> ({pos.cohort})")
         lines.append("")
 
     # Add scan statistics after positions
