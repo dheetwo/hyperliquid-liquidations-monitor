@@ -523,12 +523,7 @@ class MonitorService:
         logger.info("=" * 60)
 
         # Send startup notification
-        self.alerts.send_service_status(
-            "started",
-            f"Initial scan complete\n"
-            f"Positions: {len(self.position_cache.positions)}\n"
-            f"Critical: {tier_counts['critical']} | High: {tier_counts['high']} | Normal: {tier_counts['normal']}"
-        )
+        self.alerts.send_service_status("started")
 
     def _run_main_loop(self):
         """
