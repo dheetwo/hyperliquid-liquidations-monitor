@@ -1096,6 +1096,85 @@ class TelegramAlerts:
         message = "\n".join(lines)
         return self._send_message(message)
 
+    def send_liquidation_alert_simple(
+        self,
+        token: str,
+        side: str,
+        address: str,
+        position_value: float,
+        liq_price: float,
+        liquidation_type: str = "full",
+        new_value: float = 0,
+        is_isolated: bool = False,
+        exchange: str = "main",
+        alert_time: datetime = None
+    ) -> Optional[int]:
+        """
+        Send liquidation alert with simple parameters (for cache-based monitoring).
+
+        Args:
+            token: Token symbol
+            side: "Long" or "Short"
+            address: Wallet address
+            position_value: Previous position value in USD
+            liq_price: Liquidation price
+            liquidation_type: "full" or "partial"
+            new_value: New position value (0 for full liquidation)
+            is_isolated: Whether isolated margin
+            exchange: Exchange name (default: "main")
+            alert_time: Alert timestamp
+
+        Returns:
+            message_id if sent successfully, None otherwise
+        """
+        if alert_time is None:
+            alert_time = datetime.now(timezone.utc)
+
+        def format_value(v: float) -> str:
+            # Round down to nearest 10k
+            v = (v // 10_000) * 10_000
+            if v >= 1_000_000:
+                return f"${v / 1_000_000:.1f}M"
+            else:
+                return f"${v / 1_000:.0f}K"
+
+        def format_price(p: float) -> str:
+            if p >= 1000:
+                return f"${p:,.0f}"
+            elif p >= 1:
+                return f"${p:.2f}"
+            else:
+                return f"${p:.6f}"
+
+        hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+        addr_display = f"{address[:6]}...{address[-4:]}"
+
+        # Build token display with exchange prefix if not main
+        if exchange and exchange != "main":
+            token_display = f"{exchange}:{token}"
+        else:
+            token_display = token
+
+        liq_str = format_price(liq_price) if liq_price else ""
+        side_str = "L" if side == "Long" else "S"
+        margin_type = "Iso" if is_isolated else "Cross"
+
+        if liquidation_type == "full":
+            lines = [
+                f"🔴 {format_value(position_value)} FULL LIQUIDATION on {token_display} at {liq_str}",
+                f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            ]
+        else:
+            liquidated_amount = position_value - new_value
+            lines = [
+                f"⚠️ {format_value(liquidated_amount)} PARTIAL LIQUIDATION on {token_display} at {liq_str}",
+                f"{token_display} | {side_str} | → {format_value(new_value)} | {margin_type}",
+                f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
+            ]
+
+        message = "\n".join(lines)
+        return self._send_message(message, skip_rate_limit=True)
+
     def send_service_status(
         self,
         status: str,
