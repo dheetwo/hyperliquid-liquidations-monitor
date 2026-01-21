@@ -34,17 +34,17 @@ logger = logging.getLogger(__name__)
 
 # Cohort groupings
 HIGH_PRIORITY_COHORTS = ["kraken", "large_whale", "rekt"]
-NORMAL_COHORTS = ["kraken", "large_whale", "whale", "rekt", "extremely_profitable"]
-ALL_COHORTS = ["kraken", "large_whale", "whale", "rekt", "extremely_profitable", "shark", "very_unprofitable", "very_profitable"]
+NORMAL_COHORTS = ["kraken", "large_whale", "whale", "rekt", "extremely_profitable", "very_unprofitable", "very_profitable"]
+ALL_COHORTS = ["kraken", "large_whale", "whale", "rekt", "extremely_profitable", "shark", "very_unprofitable", "very_profitable", "profitable", "unprofitable"]
 
 # DEX/Exchange identifiers
 MAIN_DEX = ""
 CORE_DEXES = [MAIN_DEX, "xyz"]  # main + xyz only
-ALL_DEXES = [MAIN_DEX, "xyz", "flx", "vntl", "hyna", "km"]
+ALL_DEXES = [MAIN_DEX, "xyz", "flx", "hyna", "km"]  # vntl excluded: no external price discovery
 
 # Scan mode configurations
-# high-priority: kraken + large_whale, main + xyz only
-# normal: kraken + large_whale + whale, main + xyz only
+# high-priority: kraken + large_whale + rekt, main + xyz only
+# normal: kraken + large_whale + whale + rekt + profit/loss cohorts, main + xyz only
 # comprehensive: all cohorts, all exchanges
 # whale-only: whale cohort only (incremental for progressive scan)
 # shark-incremental: shark cohort + all exchanges for all cohorts already scanned
@@ -67,13 +67,13 @@ SCAN_MODES = {
         "dexes": CORE_DEXES,
     },
     "shark-incremental": {
-        "cohorts": ["shark", "very_unprofitable", "very_profitable"],  # Secondary cohorts
+        "cohorts": ["shark"],  # Secondary cohorts
         "dexes": ALL_DEXES,    # All exchanges (secondary cohorts need full coverage)
         # Note: Also need to scan existing cohorts on new exchanges
         # This is handled by additional_scans below
         "additional_scans": [
             # Scan normal cohorts on the extra exchanges they missed
-            {"cohorts": NORMAL_COHORTS, "dexes": ["flx", "vntl", "hyna", "km"]},
+            {"cohorts": NORMAL_COHORTS, "dexes": ["flx", "hyna", "km"]},
         ],
     },
 }
@@ -81,7 +81,7 @@ SCAN_MODES = {
 # Legacy aliases for backward compatibility
 PRIORITY_COHORTS = NORMAL_COHORTS
 SECONDARY_COHORTS = ["shark", "very_unprofitable", "very_profitable"]
-SUB_EXCHANGES = ["xyz", "flx", "vntl", "hyna", "km"]
+SUB_EXCHANGES = ["xyz", "flx", "hyna", "km"]  # vntl excluded: no external price discovery
 
 # Rate limiting settings (sync mode)
 REQUEST_DELAY = 0.2  # seconds between API calls
@@ -852,9 +852,9 @@ def main():
     print("="*60)
     print(f"Total positions: {len(positions)}")
     print(f"\nScan modes:")
-    print("  high-priority  - kraken + large_whale, main + xyz only")
-    print("  normal         - kraken + large_whale + whale, main + xyz only")
-    print("  comprehensive  - all cohorts, all exchanges")
+    print("  high-priority  - kraken + large_whale + rekt, main + xyz only")
+    print("  normal         - kraken + large_whale + whale + profit/loss, main + xyz only")
+    print("  comprehensive  - all cohorts (including shark), all exchanges")
 
 
 if __name__ == "__main__":

@@ -60,7 +60,7 @@ CACHE_PRUNE_AGE_HOURS = 24   # Delete positions not refreshed in 24h
 
 # Times for daily summary messages (24h format, EST)
 DAILY_SUMMARY_TIMES = [
-    (7, 0),   # 7:00 AM EST
+    (9, 0),   # 9:00 AM EST
     (16, 0),  # 4:00 PM EST
 ]
 
@@ -106,7 +106,7 @@ MAIN_THRESHOLDS_CROSS = {
     "TIER1_ALTS": 25_000_000,     # $25M - SOL, BNB, XRP
     "TIER2_ALTS": 10_000_000,     # $10M - DOGE, ADA, AVAX, etc.
     "MID_ALTS": 5_000_000,        # $5M - APT, ARB, memes, DeFi, etc.
-    "SMALL_CAPS": 1_000_000,      # $1M - everything else
+    "SMALL_CAPS": 1_500_000,      # $1.5M - everything else
 }
 
 # Legacy compatibility
@@ -146,11 +146,12 @@ XYZ_THRESHOLDS = {
 }
 
 # -----------------------------------------------------------------------------
-# OTHER HIP-3 SUB-EXCHANGES (flx, vntl, hyna, km) - All Isolated
+# OTHER HIP-3 SUB-EXCHANGES (flx, hyna, km) - All Isolated
+# Note: vntl excluded - private equity assets have no external price discovery
 # -----------------------------------------------------------------------------
 # These sub-exchanges have lower liquidity; flat threshold for all tokens
 
-OTHER_SUB_EXCHANGES = {"flx", "vntl", "hyna", "km"}
+OTHER_SUB_EXCHANGES = {"flx", "hyna", "km"}  # vntl excluded: no external price discovery
 OTHER_SUB_EXCHANGE_THRESHOLD = 500_000  # $500K for all tokens
 
 # =============================================================================
@@ -230,11 +231,13 @@ ALERT_NATURAL_RECOVERY = False
 # WATCHLIST SETTINGS
 # =============================================================================
 
-# Minimum hunting score to include in watchlist (filters out low-priority positions)
-MIN_HUNTING_SCORE = 0
-
 # Maximum distance (%) to include in watchlist - positions farther won't be monitored
 MAX_WATCH_DISTANCE_PCT = 5.0
+
+# Minimum wallet position value to fetch positions for
+# Wallets with total notional below this are skipped entirely (saves API calls)
+# Matches lowest position threshold ($300K isolated small caps)
+MIN_WALLET_POSITION_VALUE = 300_000  # $300K
 
 # Minimum notional thresholds are now defined via token classification above.
 # Use get_watchlist_threshold() function to get the threshold for a given token.
@@ -267,9 +270,9 @@ MAX_MESSAGE_LENGTH = 4000  # Telegram limit is 4096
 # Default scan mode for the monitor service
 DEFAULT_SCAN_MODE = "normal"
 
-# Available modes (from src/scrapers/position.py):
-# - "high-priority": kraken + large_whale, main + xyz only
-# - "normal": kraken + large_whale + whale, main + xyz only
+# Available modes (from src/pipeline/step2_position.py):
+# - "high-priority": kraken + large_whale + rekt, main + xyz only
+# - "normal": kraken + large_whale + whale + rekt + profit/loss cohorts, main + xyz only
 # - "comprehensive": all cohorts, all exchanges
 
 # =============================================================================
@@ -287,6 +290,52 @@ FILTERED_DATA_PATH = "data/processed/filtered_position_data.csv"
 
 LOG_LEVEL = "INFO"
 LOG_FILE = "logs/monitor.log"
+
+# =============================================================================
+# SECONDARY MONITOR SETTINGS (All-Cohorts Monitor)
+# =============================================================================
+# Settings for running a secondary monitor that covers ALL cohorts with
+# lower thresholds. Designed to run alongside the primary monitor without
+# impacting performance.
+#
+# Key differences from primary monitor:
+# - Lower notional thresholds (captures more positions)
+# - Longer discovery intervals (less API pressure)
+# - Separate database file (no lock contention)
+# - Optional separate Telegram channel
+
+# Separate Telegram channel for secondary alerts (optional)
+# If not set, uses the same channel as primary monitor
+SECONDARY_TELEGRAM_BOT_TOKEN = os.environ.get("SECONDARY_TELEGRAM_BOT_TOKEN", "")
+SECONDARY_TELEGRAM_CHAT_ID = os.environ.get("SECONDARY_TELEGRAM_CHAT_ID", "")
+
+# Use primary channel if secondary not configured
+def get_secondary_telegram_config():
+    """Get Telegram config for secondary monitor, falling back to primary."""
+    bot_token = SECONDARY_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN
+    chat_id = SECONDARY_TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID
+    return bot_token, chat_id
+
+# Secondary monitor notional thresholds (lower than primary)
+# These are divisors applied to primary thresholds
+SECONDARY_THRESHOLD_DIVISOR = 10.0  # 10x lower thresholds
+
+# Secondary discovery intervals (longer than primary - less API pressure)
+SECONDARY_DISCOVERY_MIN_INTERVAL_MINUTES = 60   # 1 hour minimum
+SECONDARY_DISCOVERY_MAX_INTERVAL_MINUTES = 360  # 6 hours maximum
+
+# Secondary refresh intervals (slower than primary)
+SECONDARY_CACHE_REFRESH_CRITICAL_SEC = 0.5   # Slower critical refresh
+SECONDARY_CACHE_REFRESH_HIGH_SEC = 5.0       # Slower high refresh
+SECONDARY_CACHE_REFRESH_NORMAL_SEC = 60.0    # Slower normal refresh
+
+# Secondary database file (separate from primary to avoid contention)
+SECONDARY_DB_PATH = "data/monitor_secondary.db"
+SECONDARY_LOG_FILE = "logs/monitor_secondary.log"
+
+# Maximum positions to track in secondary monitor
+# Prevents runaway memory usage with lower thresholds
+SECONDARY_MAX_POSITIONS = 5000
 
 
 def get_proximity_alert_threshold() -> float:
@@ -308,7 +357,7 @@ def get_watchlist_threshold(token: str, exchange: str, is_isolated: bool) -> flo
 
     Args:
         token: Token symbol (e.g., "BTC", "TSLA", "GOLD")
-        exchange: Exchange name ("main", "xyz", "flx", "vntl", "hyna", "km")
+        exchange: Exchange name ("main", "xyz", "flx", "hyna", "km")
         is_isolated: Whether the position uses isolated margin
 
     Returns:
@@ -340,7 +389,7 @@ def get_watchlist_threshold(token: str, exchange: str, is_isolated: bool) -> flo
             # Default for unknown xyz tokens (probably equities)
             return XYZ_THRESHOLDS["EQUITIES"]
 
-    # Other HIP-3 sub-exchanges (flx, vntl, hyna, km) - flat threshold
+    # Other HIP-3 sub-exchanges (flx, hyna, km) - flat threshold
     if exchange in OTHER_SUB_EXCHANGES:
         return OTHER_SUB_EXCHANGE_THRESHOLD
 
@@ -417,3 +466,22 @@ def passes_new_position_threshold(
             return True
 
     return False
+
+
+def get_secondary_watchlist_threshold(token: str, exchange: str, is_isolated: bool) -> float:
+    """
+    Get the minimum notional threshold for secondary monitor watchlist inclusion.
+
+    Uses the same tier-based logic as get_watchlist_threshold but applies
+    SECONDARY_THRESHOLD_DIVISOR to lower all thresholds.
+
+    Args:
+        token: Token symbol (e.g., "BTC", "TSLA", "GOLD")
+        exchange: Exchange name ("main", "xyz", "flx", "vntl", "hyna", "km")
+        is_isolated: Whether the position uses isolated margin
+
+    Returns:
+        Minimum notional value in USD (lower than primary thresholds)
+    """
+    primary_threshold = get_watchlist_threshold(token, exchange, is_isolated)
+    return primary_threshold / SECONDARY_THRESHOLD_DIVISOR

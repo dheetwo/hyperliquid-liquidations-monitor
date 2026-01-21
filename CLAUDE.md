@@ -94,6 +94,7 @@ hyperdash_scanner/
 **Step 2: Position Scraper** (`src/pipeline/step2_position.py`)
 - Source: `https://api.hyperliquid.xyz/info` (clearinghouseState)
 - Scans 5 exchanges per wallet: main + 4 sub-exchanges (xyz, flx, hyna, km)
+- Note: vntl excluded - private equity assets have no external price discovery
 - Captures all positions with full details
 - Output: `data/raw/position_data*.csv`
 
@@ -113,11 +114,11 @@ hyperdash_scanner/
 | whale | $250K-$1M | 3 | ~280 | all |
 | rekt | Large realized losses | 3 | varies | all |
 | extremely_profitable | Large realized profits | 3 | varies | all |
+| very_unprofitable | Large unrealized losses | 4 | varies | all |
+| very_profitable | Large unrealized profits | 4 | varies | all |
 | profitable | Realized profits | 4 | varies | all |
-| unprofitable | Realized losses | 4 | varies | all |
-| shark | $100K-$250K | 5 | ~1559 | comprehensive only |
-| very_unprofitable | Large unrealized losses | 6 (lowest) | varies | comprehensive only |
-| very_profitable | Large unrealized profits | 6 | varies | comprehensive only |
+| unprofitable | Unrealized losses | 4 | varies | all |
+| shark | $100K-$250K | 5 (lowest) | ~1559 | all |
 
 ### Wallet Filtering
 - **Minimum wallet value**: $300K total position value (skip low-value wallets)
@@ -133,6 +134,8 @@ hyperdash_scanner/
 | flx (Felix) | "flx" | Select perps | **All Isolated** |
 | hyna (Hyena) | "hyna" | Sub-exchange | **All Isolated** |
 | km | "km" | Sub-exchange | **All Isolated** |
+
+**Excluded:** vntl (private equity - ANTHROPIC, OPENAI, SPACEX) has no external price discovery, making cascade detection impossible.
 
 ### Why Sub-Exchange Positions Matter
 - **Isolated margin** = liquidation affects only that position (no cross-collateral buffer)
@@ -381,7 +384,7 @@ The monitor service uses cache-based continuous monitoring instead.
 | Mode | Cohorts | Exchanges | Use Case |
 |------|---------|-----------|----------|
 | high-priority | kraken, large_whale, rekt | main, xyz | Fast scan of largest + rekt traders |
-| normal | kraken, large_whale, whale, rekt, extremely_profitable | main, xyz | Default balanced scan |
+| normal | all cohorts | main, xyz | Default balanced scan |
 | comprehensive | all cohorts | all 5 exchanges | Full coverage, slower |
 
 ## Common Commands

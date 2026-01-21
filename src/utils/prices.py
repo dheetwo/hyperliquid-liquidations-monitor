@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 HYPERLIQUID_API = "https://api.hyperliquid.xyz/info"
 
 # All exchanges to fetch prices from
-ALL_DEXES = ["", "xyz", "flx", "vntl", "hyna", "km"]
+ALL_DEXES = ["", "xyz", "flx", "hyna", "km"]  # vntl excluded: no external price discovery
 
 # Async concurrency settings
 MAX_CONCURRENT_REQUESTS = 20
@@ -164,7 +164,7 @@ def get_current_price(token: str, exchange: str, mark_prices: Dict[str, float]) 
 
     Args:
         token: Token symbol (e.g., "BTC", "TSLA")
-        exchange: Exchange name ("main", "xyz", "flx", "vntl", "hyna", "km")
+        exchange: Exchange name ("main", "xyz", "flx", "hyna", "km")
         mark_prices: Dict of all mark prices
 
     Returns:

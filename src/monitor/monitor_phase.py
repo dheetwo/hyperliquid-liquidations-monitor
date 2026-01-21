@@ -16,9 +16,21 @@ from typing import Dict, Optional, TYPE_CHECKING
 import pytz
 import requests
 
+from src.api.hyperliquid import HyperliquidAPIClient
 from src.pipeline import fetch_all_positions_for_address
 from src.pipeline.step3_filter import calculate_distance_to_liquidation
 from src.utils.prices import fetch_all_mark_prices_async, get_current_price
+
+# Shared API client for liquidation verification
+_hl_client: Optional[HyperliquidAPIClient] = None
+
+
+def _get_hl_client() -> HyperliquidAPIClient:
+    """Get or create shared HyperliquidAPIClient instance."""
+    global _hl_client
+    if _hl_client is None:
+        _hl_client = HyperliquidAPIClient()
+    return _hl_client
 from config.monitor_settings import (
     CRITICAL_ALERT_PCT,
     RECOVERY_PCT,
@@ -136,45 +148,76 @@ def refresh_critical_positions(service: 'MonitorService', mark_prices: Dict) -> 
                     new_liq_px = pos_obj.get("liquidationPx")
                     new_value = float(pos_obj.get("positionValue", 0)) if pos_obj.get("positionValue") else 0
 
-                    # Check for partial liquidation (value dropped significantly)
+                    # Check for position value drop and verify if it's a liquidation
+                    # This is mutually exclusive with collateral added detection
+                    detected_partial_liq = False
                     if old_position_value > 0 and new_value > 0:
                         value_drop_pct = (old_position_value - new_value) / old_position_value
                         if value_drop_pct >= PARTIAL_LIQ_THRESHOLD_PCT / 100:
-                            # Get current price for the alert
-                            current_price = get_current_price(position.token, position.exchange, mark_prices)
+                            # Value dropped significantly - verify via ledger API if it was a liquidation
+                            # Query ledger for last 60 seconds (positions are refreshed every few seconds)
+                            now_ms = int(time.time() * 1000)
+                            lookback_ms = 60 * 1000  # 60 second lookback window
+                            start_time_ms = now_ms - lookback_ms
 
-                            logger.info(
-                                f"PARTIAL LIQUIDATION detected: {position.token} {position.side} "
-                                f"value dropped {value_drop_pct*100:.1f}% "
-                                f"(${old_position_value/1e6:.2f}M -> ${new_value/1e6:.2f}M)"
+                            hl_client = _get_hl_client()
+                            liq_event = hl_client.check_for_liquidation_event(
+                                address=position.address,
+                                coin=position.token,
+                                start_time=start_time_ms,
+                                end_time=now_ms
                             )
-                            reply_to = position.last_proximity_message_id or position.alert_message_id
-                            msg_id = service.alerts.send_liquidation_alert(
-                                position,
-                                liquidation_type="partial",
-                                old_value=old_position_value,
-                                new_value=new_value,
-                                last_distance=old_distance,
-                                current_price=current_price,
-                                reply_to_message_id=reply_to
-                            )
-                            if msg_id:
-                                position.last_proximity_message_id = msg_id
-                                position.alerted_liquidation = True
-                                service.db.log_liquidation_event(
-                                    position_key=position.position_key,
-                                    event_type="partial_liquidation",
+
+                            if liq_event:
+                                # Confirmed liquidation via on-chain data
+                                detected_partial_liq = True
+                                current_price = get_current_price(position.token, position.exchange, mark_prices)
+
+                                logger.info(
+                                    f"PARTIAL LIQUIDATION (verified): {position.token} {position.side} "
+                                    f"value dropped {value_drop_pct*100:.1f}% "
+                                    f"(${old_position_value/1e6:.2f}M -> ${new_value/1e6:.2f}M)"
+                                )
+                                reply_to = position.last_proximity_message_id or position.alert_message_id
+                                msg_id = service.alerts.send_liquidation_alert(
+                                    position,
+                                    liquidation_type="partial",
                                     old_value=old_position_value,
                                     new_value=new_value,
-                                    details=f"Value dropped {value_drop_pct*100:.1f}%"
+                                    last_distance=old_distance,
+                                    current_price=current_price,
+                                    reply_to_message_id=reply_to
                                 )
+                                if msg_id:
+                                    position.last_proximity_message_id = msg_id
+                                    position.alerted_liquidation = True
+                                    service.db.log_liquidation_event(
+                                        position_key=position.position_key,
+                                        event_type="partial_liquidation",
+                                        old_value=old_position_value,
+                                        new_value=new_value,
+                                        details=f"Value dropped {value_drop_pct*100:.1f}% (verified via ledger)"
+                                    )
+                            else:
+                                # No liquidation event found - user voluntarily reduced position
+                                # This is NOT a liquidation, treat as risk reduction (similar to collateral added)
+                                logger.info(
+                                    f"VOLUNTARY CLOSE detected: {position.token} {position.side} "
+                                    f"value dropped {value_drop_pct*100:.1f}% "
+                                    f"(${old_position_value/1e6:.2f}M -> ${new_value/1e6:.2f}M) "
+                                    f"- no liquidation event found, user reduced position"
+                                )
+                                # Set flag to skip collateral added check (position size change explains liq price change)
+                                detected_partial_liq = True  # Reuse flag to skip collateral check
 
                     # Update liquidation price and check for collateral addition
+                    # Skip collateral check if partial liquidation was detected (mutually exclusive)
                     if new_liq_px is not None:
                         new_liq_price = float(new_liq_px)
 
                         # Check for collateral addition (liq price moved to safer level)
-                        if old_liq_price and new_liq_price != old_liq_price:
+                        # Only check if NOT a partial liquidation (events are mutually exclusive)
+                        if old_liq_price and new_liq_price != old_liq_price and not detected_partial_liq:
                             liq_change_pct = abs(new_liq_price - old_liq_price) / old_liq_price * 100
 
                             # Determine if liq moved to a safer level
