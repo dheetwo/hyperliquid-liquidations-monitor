@@ -19,6 +19,8 @@ from .step1_cohort import (
     PRIORITY_COHORTS,
     SECONDARY_COHORTS,
     ALL_COHORTS,
+    SIZE_COHORTS,
+    PNL_COHORTS,
 )
 
 # Step 2: Position scraper
@@ -57,6 +59,8 @@ __all__ = [
     "PRIORITY_COHORTS",
     "SECONDARY_COHORTS",
     "ALL_COHORTS",
+    "SIZE_COHORTS",
+    "PNL_COHORTS",
     # Step 2
     "load_cohort_addresses",
     "fetch_all_positions",
