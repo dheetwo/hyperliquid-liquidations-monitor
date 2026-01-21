@@ -1255,28 +1255,14 @@ def send_daily_summary(
         lines.append("")
 
     # Add scan statistics after positions
-    if scan_stats and scan_stats.get('total_positions', 0) > 0:
-        total = scan_stats['total_positions']
-        no_liq = scan_stats.get('no_liq_price', 0)
-        below_notional = scan_stats.get('below_notional', 0)
-        distance_far = scan_stats.get('distance_too_far', 0)
-        passed = scan_stats.get('passed_filters', 0)
+    monitoring_count = len(critical) + len(high) + len(normal_filtered)
+    total = scan_stats.get('total_positions', 0) if scan_stats else 0
 
-        # Multi-filter combinations
-        no_liq_notional = scan_stats.get('no_liq_and_below_notional', 0)
-        no_liq_dist = scan_stats.get('no_liq_and_distance', 0)
-        notional_dist = scan_stats.get('below_notional_and_distance', 0)
-        all_three = scan_stats.get('all_three_filters', 0)
-        multi_filter_total = no_liq_notional + no_liq_dist + notional_dist + all_three
-
-        lines.append(f"📊 Scanned: {total:,} positions")
-        lines.append(f"├ No liq price: {no_liq:,}")
-        lines.append(f"├ Below threshold: {below_notional:,}")
-        lines.append(f"├ Distance >5%: {distance_far:,}")
-        if multi_filter_total > 0:
-            lines.append(f"├ Multiple filters: {multi_filter_total:,}")
-        lines.append(f"└ Monitoring: {passed:,}")
-        lines.append("")
+    if total > 0:
+        lines.append(f"📊 Scanned {total:,} positions, monitoring {monitoring_count}")
+    else:
+        lines.append(f"📊 Monitoring {monitoring_count}")
+    lines.append("")
 
     # Add header at the end
     lines.append(header)
