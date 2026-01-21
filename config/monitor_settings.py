@@ -55,16 +55,12 @@ CACHE_PRUNE_AGE_HOURS = 24   # Delete positions not refreshed in 24h
 # =============================================================================
 # DAILY SUMMARY SETTINGS
 # =============================================================================
-# Two daily summary messages showing all monitored positions.
+# Daily summary message showing all monitored positions.
 # No intraday "new position" alerts - just quiet backend updates.
 
 # Times for daily summary messages (24h format, EST)
 DAILY_SUMMARY_TIMES = [
     (6, 0),   # 6:00 AM EST
-    (9, 0),   # 9:00 AM EST
-    (12, 0),  # 12:00 PM EST
-    (16, 0),  # 4:00 PM EST
-    (21, 0),  # 9:00 PM EST
 ]
 
 # =============================================================================
