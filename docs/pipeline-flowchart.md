@@ -78,12 +78,13 @@
 │   │                                                                     │   │
 │   │   For each wallet address:                                          │   │
 │   │   ┌───────────────────────────────────────────────────────────────┐ │   │
-│   │   │  ┌──────┐  ┌─────┐  ┌─────┐  ┌──────┐  ┌──────┐  ┌────┐     │ │   │
-│   │   │  │ main │  │ xyz │  │ flx │  │ vntl │  │ hyna │  │ km │     │ │   │
-│   │   │  │      │  │     │  │     │  │      │  │      │  │    │     │ │   │
-│   │   │  │Cross/│  │ All │  │ All │  │ All  │  │ All  │  │All │     │ │   │
-│   │   │  │Isol. │  │Isol.│  │Isol.│  │Isol. │  │Isol. │  │Iso.│     │ │   │
-│   │   │  └──────┘  └─────┘  └─────┘  └──────┘  └──────┘  └────┘     │ │   │
+│   │   │  ┌──────┐  ┌─────┐  ┌─────┐  ┌──────┐  ┌────┐               │ │   │
+│   │   │  │ main │  │ xyz │  │ flx │  │ hyna │  │ km │               │ │   │
+│   │   │  │      │  │     │  │     │  │      │  │    │               │ │   │
+│   │   │  │Cross/│  │ All │  │ All │  │ All  │  │All │               │ │   │
+│   │   │  │Isol. │  │Isol.│  │Isol.│  │Isol. │  │Iso.│               │ │   │
+│   │   │  └──────┘  └─────┘  └─────┘  └──────┘  └────┘               │ │   │
+│   │   │  Note: vntl excluded (no external price discovery)          │ │   │
 │   │   └───────────────────────────────────────────────────────────────┘ │   │
 │   │                                                                     │   │
 │   │   Rate limiting:                                                    │   │
@@ -358,9 +359,9 @@
 │  │ normal         │ kraken, large_whale,     │ main, xyz                │   │
 │  │                │ whale (~601 addresses)   │ (2 exchanges)            │   │
 │  ├────────────────┼──────────────────────────┼──────────────────────────┤   │
-│  │ comprehensive  │ all cohorts including    │ all 6 exchanges          │   │
-│  │                │ shark (~2160 addresses)  │ (main,xyz,flx,vntl,      │   │
-│  │                │                          │  hyna,km)                │   │
+│  │ comprehensive  │ all cohorts including    │ all 5 exchanges          │   │
+│  │                │ shark (~2160 addresses)  │ (main,xyz,flx,hyna,km)   │   │
+│  │                │                          │                          │   │
 │  └────────────────┴──────────────────────────┴──────────────────────────┘   │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘

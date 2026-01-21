@@ -86,7 +86,8 @@ hyperdash_scanner/
 
 **Step 2: Position Scraper** (`src/pipeline/step2_position.py`)
 - Source: `https://api.hyperliquid.xyz/info` (clearinghouseState)
-- Scans 6 exchanges per wallet: main + 5 sub-exchanges (xyz, flx, vntl, hyna, km)
+- Scans 5 exchanges per wallet: main + 4 sub-exchanges (xyz, flx, hyna, km)
+- Note: vntl excluded - private equity assets have no external price discovery for cascade detection
 - Captures all positions with full details
 - Output: `data/raw/position_data*.csv`
 
@@ -119,9 +120,10 @@ hyperdash_scanner/
 | Main | "" | Primary Hyperliquid perps | Cross/Isolated |
 | xyz (TradeXYZ) | "xyz" | Stocks, indices, commodities | **All Isolated** |
 | flx (Felix) | "flx" | Select perps | **All Isolated** |
-| vntl | "vntl" | Sub-exchange | **All Isolated** |
 | hyna (Hyena) | "hyna" | Sub-exchange | **All Isolated** |
 | km | "km" | Sub-exchange | **All Isolated** |
+
+**Excluded:** vntl (private equity - ANTHROPIC, OPENAI, SPACEX) has no external price discovery, making cascade detection impossible.
 
 ### Why Sub-Exchange Positions Matter
 - **Isolated margin** = liquidation affects only that position (no cross-collateral buffer)
@@ -140,7 +142,7 @@ hyperdash_scanner/
 - `Liquidation Price` - empty if none (safe for numeric ops)
 - `Mark Price` - current price at scan time
 - `Position Value` - notional size in USD
-- `Exchange` - "main", "xyz", "flx", "vntl", "hyna", or "km"
+- `Exchange` - "main", "xyz", "flx", "hyna", or "km"
 - `Isolated` - True/False (all sub-exchange = True)
 
 ### filtered_position_data.csv
@@ -508,7 +510,7 @@ query GetSizeCohort($id: String!, $limit: Int!, $offset: Int!) {
 # Main exchange
 {"type": "clearinghouseState", "user": "0x..."}
 
-# Sub-exchange (xyz, flx, vntl, hyna, km)
+# Sub-exchange (xyz, flx, hyna, km)
 {"type": "clearinghouseState", "user": "0x...", "dex": "xyz"}
 ```
 

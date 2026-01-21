@@ -40,7 +40,7 @@ ALL_COHORTS = ["kraken", "large_whale", "whale", "shark"]
 # DEX/Exchange identifiers
 MAIN_DEX = ""
 CORE_DEXES = [MAIN_DEX, "xyz"]  # main + xyz only
-ALL_DEXES = [MAIN_DEX, "xyz", "flx", "hyna", "km"]
+ALL_DEXES = [MAIN_DEX, "xyz", "flx", "hyna", "km"]  # vntl excluded: no external price discovery
 
 # Scan mode configurations
 # high-priority: kraken + large_whale, main + xyz only
@@ -81,7 +81,7 @@ SCAN_MODES = {
 # Legacy aliases for backward compatibility
 PRIORITY_COHORTS = NORMAL_COHORTS
 SECONDARY_COHORTS = ["shark"]
-SUB_EXCHANGES = ["xyz", "flx", "hyna", "km"]
+SUB_EXCHANGES = ["xyz", "flx", "hyna", "km"]  # vntl excluded: no external price discovery
 
 # Rate limiting settings (sync mode)
 REQUEST_DELAY = 0.2  # seconds between API calls
