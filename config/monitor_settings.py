@@ -272,9 +272,9 @@ MAX_MESSAGE_LENGTH = 4000  # Telegram limit is 4096
 # Default scan mode for the monitor service
 DEFAULT_SCAN_MODE = "normal"
 
-# Available modes (from src/scrapers/position.py):
-# - "high-priority": kraken + large_whale, main + xyz only
-# - "normal": kraken + large_whale + whale, main + xyz only
+# Available modes (from src/pipeline/step2_position.py):
+# - "high-priority": kraken + large_whale + rekt, main + xyz only
+# - "normal": kraken + large_whale + whale + rekt + profit/loss cohorts, main + xyz only
 # - "comprehensive": all cohorts, all exchanges
 
 # =============================================================================
