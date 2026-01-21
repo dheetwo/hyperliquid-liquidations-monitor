@@ -47,7 +47,7 @@ def fetch_all_mark_prices() -> Dict[str, float]:
         Dict mapping token symbol to mark price
     """
     all_prices = {}
-    dexes = ["", "xyz", "flx", "vntl", "hyna", "km"]  # "" = main exchange
+    dexes = ["", "xyz", "flx", "hyna", "km"]  # "" = main exchange; vntl excluded (no external price discovery)
 
     for dex in dexes:
         try:

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 HYPERLIQUID_API = "https://api.hyperliquid.xyz/info"
 
 # All exchanges to fetch prices from
-ALL_DEXES = ["", "xyz", "flx", "vntl", "hyna", "km"]
+ALL_DEXES = ["", "xyz", "flx", "hyna", "km"]  # vntl excluded: no external price discovery
 
 # Async concurrency settings
 MAX_CONCURRENT_REQUESTS = 20
