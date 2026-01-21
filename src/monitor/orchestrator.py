@@ -33,6 +33,7 @@ from src.pipeline import (
     fetch_all_mark_prices_async,
     fetch_all_positions_async,
     fetch_all_positions_for_address,
+    parse_position,
     ALL_COHORTS,
     ALL_DEXES,
 )
@@ -386,7 +387,12 @@ class MonitorService:
                 )
 
                 # Find matching position
-                for fresh_pos in fresh_positions:
+                for raw_pos, exchange in fresh_positions:
+                    # Parse raw position dict into Position object
+                    fresh_pos = parse_position(pos.address, pos.cohort, raw_pos, mark_prices, exchange)
+                    if not fresh_pos:
+                        continue
+
                     fresh_key = f"{fresh_pos.address}:{fresh_pos.token}:{fresh_pos.exchange}:{fresh_pos.side}"
                     if fresh_key == position_key:
                         # Update cached position
