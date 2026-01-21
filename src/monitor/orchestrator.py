@@ -66,6 +66,7 @@ from config.monitor_settings import (
     CRITICAL_ZONE_PCT,
     CRITICAL_ALERT_PCT,
     RECOVERY_PCT,
+    ALERT_NATURAL_RECOVERY,
     COHORT_DATA_PATH,
     MAX_WATCH_DISTANCE_PCT,
     MIN_WALLET_POSITION_VALUE,
@@ -674,19 +675,21 @@ class MonitorService:
             distance = pos.distance_pct
             was_critical = alert_state.get('in_critical_zone', False)
 
-            # Recovery alert: was critical, now > RECOVERY_PCT
+            # Recovery: was critical, now > RECOVERY_PCT
+            # Only alert if ALERT_NATURAL_RECOVERY is enabled (default: False)
             if was_critical and distance > RECOVERY_PCT:
                 logger.info(f"RECOVERY: {pos.token} {pos.side} recovered to {distance:.3f}%")
-                self.alerts.send_recovery_alert_simple(
-                    token=pos.token,
-                    side=pos.side,
-                    address=pos.address,
-                    distance_pct=distance,
-                    liq_price=pos.liq_price,
-                    mark_price=pos.mark_price,
-                    position_value=pos.position_value,
-                    is_isolated=(pos.leverage_type.lower() == 'isolated' or pos.exchange != 'main'),
-                )
+                if ALERT_NATURAL_RECOVERY:
+                    self.alerts.send_recovery_alert_simple(
+                        token=pos.token,
+                        side=pos.side,
+                        address=pos.address,
+                        distance_pct=distance,
+                        liq_price=pos.liq_price,
+                        mark_price=pos.mark_price,
+                        position_value=pos.position_value,
+                        is_isolated=(pos.leverage_type.lower() == 'isolated' or pos.exchange != 'main'),
+                    )
                 alert_state['alerted_proximity'] = False
                 alert_state['alerted_critical'] = False
                 alert_state['in_critical_zone'] = False
