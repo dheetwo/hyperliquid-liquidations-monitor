@@ -280,32 +280,56 @@ def refresh_critical_positions(service: 'MonitorService', mark_prices: Dict) -> 
                     break
 
             # Check for full liquidation (position disappeared)
+            # Verify via ledger API to distinguish from voluntary full close
             if not position_found:
-                # Get current price for the alert
-                current_price = get_current_price(position.token, position.exchange, mark_prices)
+                # Query ledger API to verify if it was a liquidation
+                now_ms = int(time.time() * 1000)
+                lookback_ms = 60 * 1000  # 60 second lookback window
+                start_time_ms = now_ms - lookback_ms
 
-                logger.info(
-                    f"FULL LIQUIDATION detected: {position.token} {position.side} "
-                    f"position disappeared (was ${old_position_value/1e6:.2f}M at {old_distance:.2f}%)"
+                hl_client = _get_hl_client()
+                liq_event = hl_client.check_for_liquidation_event(
+                    address=position.address,
+                    coin=position.token,
+                    start_time=start_time_ms,
+                    end_time=now_ms
                 )
-                reply_to = position.last_proximity_message_id or position.alert_message_id
-                msg_id = service.alerts.send_liquidation_alert(
-                    position,
-                    liquidation_type="full",
-                    old_value=old_position_value,
-                    new_value=0,
-                    last_distance=old_distance,
-                    current_price=current_price,
-                    reply_to_message_id=reply_to
-                )
-                if msg_id:
-                    service.db.log_liquidation_event(
-                        position_key=position.position_key,
-                        event_type="full_liquidation",
+
+                if liq_event:
+                    # Confirmed full liquidation via on-chain data
+                    current_price = get_current_price(position.token, position.exchange, mark_prices)
+
+                    logger.info(
+                        f"FULL LIQUIDATION (verified): {position.token} {position.side} "
+                        f"position disappeared (was ${old_position_value/1e6:.2f}M at {old_distance:.2f}%)"
+                    )
+                    reply_to = position.last_proximity_message_id or position.alert_message_id
+                    msg_id = service.alerts.send_liquidation_alert(
+                        position,
+                        liquidation_type="full",
                         old_value=old_position_value,
                         new_value=0,
-                        details=f"Position disappeared at {old_distance:.2f}% distance"
+                        last_distance=old_distance,
+                        current_price=current_price,
+                        reply_to_message_id=reply_to
                     )
+                    if msg_id:
+                        service.db.log_liquidation_event(
+                            position_key=position.position_key,
+                            event_type="full_liquidation",
+                            old_value=old_position_value,
+                            new_value=0,
+                            details=f"Position disappeared at {old_distance:.2f}% (verified via ledger)"
+                        )
+                else:
+                    # No liquidation event found - user voluntarily closed entire position
+                    logger.info(
+                        f"VOLUNTARY FULL CLOSE detected: {position.token} {position.side} "
+                        f"position disappeared (was ${old_position_value/1e6:.2f}M at {old_distance:.2f}%) "
+                        f"- no liquidation event found, user closed position"
+                    )
+
+                # Always remove from watchlist when position disappears (liquidated or closed)
                 positions_to_remove.append(position.position_key)
 
         except Exception as e:
