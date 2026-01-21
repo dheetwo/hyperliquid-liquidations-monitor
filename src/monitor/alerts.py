@@ -1147,7 +1147,7 @@ def send_daily_summary(
     def format_token_with_exchange(token: str, exchange: str) -> str:
         """Add exchange prefix for sub-exchanges, stripping any existing prefix first."""
         # Strip existing exchange prefix if present (handles corrupted data like "flx:XMR")
-        known_exchanges = {"xyz", "flx", "vntl", "hyna", "km"}
+        known_exchanges = {"xyz", "flx", "hyna", "km"}
         if ":" in token:
             prefix, rest = token.split(":", 1)
             if prefix in known_exchanges:

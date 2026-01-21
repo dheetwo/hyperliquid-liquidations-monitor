@@ -54,7 +54,7 @@ class Position:
     margin_used: float
     funding_since_open: float
     cohort: str
-    exchange: str      # "main", "xyz", "flx", "vntl", "hyna", "km"
+    exchange: str      # "main", "xyz", "flx", "hyna", "km"
     is_isolated: bool  # True for isolated margin positions (all sub-exchange positions)
 
 
@@ -75,7 +75,6 @@ class WatchedPosition:
     liq_price: float
     position_value: float
     is_isolated: bool
-    hunting_score: float
 
     # Cohort information - wallet can belong to size cohort AND/OR PNL cohort
     cohorts: Set[str] = field(default_factory=set)
