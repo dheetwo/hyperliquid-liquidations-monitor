@@ -177,6 +177,12 @@ Examples:
         help='Clear all database tables (watchlist, baseline, caches) before starting'
     )
 
+    parser.add_argument(
+        '--skip-startup-summary',
+        action='store_true',
+        help='Skip the startup watchlist summary (useful for re-deployments)'
+    )
+
     args = parser.parse_args()
 
     # Setup logging
@@ -242,6 +248,7 @@ Examples:
         service = MonitorService(
             poll_interval_seconds=args.poll,
             dry_run=args.dry_run,
+            skip_startup_summary=args.skip_startup_summary,
         )
 
         print("\nStarting monitor service...")
