@@ -398,6 +398,9 @@ class MonitorService:
             'passed_filters': 0,
         }
 
+        # Known exchange prefixes for token sanitization
+        known_exchanges = {"xyz", "flx", "vntl", "hyna", "km"}
+
         for pos in positions:
             # Get mark price for this position
             token = pos.token
@@ -405,10 +408,17 @@ class MonitorService:
             price = get_current_price(token, exchange, mark_prices)
 
             if price and price > 0:
+                # Sanitize token: strip exchange prefix if present (e.g., "xyz:GOLD" -> "GOLD")
+                clean_token = token
+                if ":" in token:
+                    prefix, rest = token.split(":", 1)
+                    if prefix in known_exchanges:
+                        clean_token = rest
+
                 # Track filter reasons
                 has_no_liq = pos.liquidation_price is None
                 below_notional = not passes_watchlist_threshold(
-                    token=token,
+                    token=clean_token,
                     exchange=exchange,
                     is_isolated=pos.is_isolated,
                     position_value=pos.position_value
@@ -723,6 +733,7 @@ class MonitorService:
             positions = fetch_all_positions_async(new_addresses, mark_prices, dexes=ALL_DEXES)
 
             # Add to cache (with filtering: liq price, notional, distance)
+            known_exchanges = {"xyz", "flx", "vntl", "hyna", "km"}
             added_count = 0
             filtered_count = 0
             for pos in positions:
@@ -731,6 +742,13 @@ class MonitorService:
                 price = get_current_price(token, exchange, mark_prices)
 
                 if price and price > 0:
+                    # Sanitize token: strip exchange prefix if present
+                    clean_token = token
+                    if ":" in token:
+                        prefix, rest = token.split(":", 1)
+                        if prefix in known_exchanges:
+                            clean_token = rest
+
                     # Filter: must have liquidation price
                     if pos.liquidation_price is None:
                         filtered_count += 1
@@ -738,7 +756,7 @@ class MonitorService:
 
                     # Filter: notional threshold
                     if not passes_watchlist_threshold(
-                        token=token,
+                        token=clean_token,
                         exchange=exchange,
                         is_isolated=pos.is_isolated,
                         position_value=pos.position_value
