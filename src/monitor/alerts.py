@@ -1189,14 +1189,19 @@ def send_daily_summary(
     high = positions_by_tier['high']
     normal = positions_by_tier['normal']
 
-    # Build message
+    def format_token_with_exchange(token: str, exchange: str) -> str:
+        """Add exchange prefix for sub-exchanges."""
+        if exchange != "main":
+            return f"{exchange}:{token}"
+        return token
+
+    # Build message - header without timestamp (moved to end)
     lines = [
         "LIQUIDATION WATCHLIST SUMMARY",
-        f"{now.strftime('%Y-%m-%d %I:%M:%S %p')} EST",
         "",
     ]
 
-    # Critical section - table format
+    # Critical section - single line per position
     if critical:
         lines.append(f"🔴 CRITICAL ZONE (≤0.125%): {len(critical)}")
         display_critical = critical[:10]
@@ -1204,12 +1209,13 @@ def send_daily_summary(
         # Pre-compute formatted values for column alignment
         formatted = []
         for pos in display_critical:
+            token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
             margin_type = "Iso" if pos.leverage_type == "Isolated" else "Cross"
             dist_str = f"{pos.distance_pct:.3f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
-            formatted.append((pos.token, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
+            formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
 
         # Find max widths for each column
         max_token = max(len(f[0]) for f in formatted)
@@ -1217,16 +1223,15 @@ def send_daily_summary(
         max_margin = max(len(f[3]) for f in formatted)
         max_dist = max(len(f[4]) for f in formatted)
 
-        for token, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
-            row = f"{token:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
-            lines.append(f"<code>{row}</code>")
+        for token_display, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
             hypurrscan_url = f"https://hypurrscan.io/address/{address}"
-            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a>")
+            row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> <code>{row}</code>")
         if len(critical) > 10:
             lines.append(f"... and {len(critical) - 10} more")
         lines.append("")
 
-    # High section - table format
+    # High section - single line per position
     if high:
         lines.append(f"🟠 HIGH PRIORITY (0.125-0.25%): {len(high)}")
         display_high = high[:10]
@@ -1234,12 +1239,13 @@ def send_daily_summary(
         # Pre-compute formatted values for column alignment
         formatted = []
         for pos in display_high:
+            token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
             margin_type = "Iso" if pos.leverage_type == "Isolated" else "Cross"
             dist_str = f"{pos.distance_pct:.3f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
-            formatted.append((pos.token, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
+            formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
 
         # Find max widths for each column
         max_token = max(len(f[0]) for f in formatted)
@@ -1247,16 +1253,15 @@ def send_daily_summary(
         max_margin = max(len(f[3]) for f in formatted)
         max_dist = max(len(f[4]) for f in formatted)
 
-        for token, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
-            row = f"{token:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
-            lines.append(f"<code>{row}</code>")
+        for token_display, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
             hypurrscan_url = f"https://hypurrscan.io/address/{address}"
-            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a>")
+            row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> <code>{row}</code>")
         if len(high) > 10:
             lines.append(f"... and {len(high) - 10} more")
         lines.append("")
 
-    # Normal section - show positions ≤3.5% with table format
+    # Normal section - show positions ≤3.5% with single line format
     # Filter out positions >3.5% as they're not worth actively monitoring
     normal_filtered = [p for p in normal if p.distance_pct is not None and p.distance_pct <= 3.5]
 
@@ -1266,12 +1271,13 @@ def send_daily_summary(
         # Pre-compute formatted values for column alignment
         formatted = []
         for pos in normal_filtered:
+            token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
             margin_type = "Iso" if pos.leverage_type == "Isolated" else "Cross"
             dist_str = f"{pos.distance_pct:.2f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
-            formatted.append((pos.token, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
+            formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
 
         # Find max widths for each column
         max_token = max(len(f[0]) for f in formatted)
@@ -1279,11 +1285,14 @@ def send_daily_summary(
         max_margin = max(len(f[3]) for f in formatted)
         max_dist = max(len(f[4]) for f in formatted)
 
-        for token, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
-            row = f"{token:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
-            lines.append(f"<code>{row}</code>")
+        for token_display, side_char, value_str, margin_type, dist_str, addr_short, address in formatted:
             hypurrscan_url = f"https://hypurrscan.io/address/{address}"
-            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a>")
+            row = f"{token_display:<{max_token}} | {side_char} | {value_str:>{max_value}} | {margin_type:<{max_margin}} | {dist_str:>{max_dist}}"
+            lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> <code>{row}</code>")
+        lines.append("")
+
+    # Timestamp at end
+    lines.append(f"{now.strftime('%Y-%m-%d %I:%M:%S %p')} EST")
 
     message = "\n".join(lines)
     return alerts._send_message(message)
