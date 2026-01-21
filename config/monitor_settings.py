@@ -146,11 +146,11 @@ XYZ_THRESHOLDS = {
 }
 
 # -----------------------------------------------------------------------------
-# OTHER HIP-3 SUB-EXCHANGES (flx, vntl, hyna, km) - All Isolated
+# OTHER HIP-3 SUB-EXCHANGES (flx, hyna, km) - All Isolated
 # -----------------------------------------------------------------------------
 # These sub-exchanges have lower liquidity; flat threshold for all tokens
 
-OTHER_SUB_EXCHANGES = {"flx", "vntl", "hyna", "km"}
+OTHER_SUB_EXCHANGES = {"flx", "hyna", "km"}
 OTHER_SUB_EXCHANGE_THRESHOLD = 500_000  # $500K for all tokens
 
 # =============================================================================
@@ -229,9 +229,6 @@ ALERT_NATURAL_RECOVERY = False
 # =============================================================================
 # WATCHLIST SETTINGS
 # =============================================================================
-
-# Minimum hunting score to include in watchlist (filters out low-priority positions)
-MIN_HUNTING_SCORE = 0
 
 # Maximum distance (%) to include in watchlist - positions farther won't be monitored
 MAX_WATCH_DISTANCE_PCT = 5.0
@@ -313,7 +310,7 @@ def get_watchlist_threshold(token: str, exchange: str, is_isolated: bool) -> flo
 
     Args:
         token: Token symbol (e.g., "BTC", "TSLA", "GOLD")
-        exchange: Exchange name ("main", "xyz", "flx", "vntl", "hyna", "km")
+        exchange: Exchange name ("main", "xyz", "flx", "hyna", "km")
         is_isolated: Whether the position uses isolated margin
 
     Returns:
@@ -345,7 +342,7 @@ def get_watchlist_threshold(token: str, exchange: str, is_isolated: bool) -> flo
             # Default for unknown xyz tokens (probably equities)
             return XYZ_THRESHOLDS["EQUITIES"]
 
-    # Other HIP-3 sub-exchanges (flx, vntl, hyna, km) - flat threshold
+    # Other HIP-3 sub-exchanges (flx, hyna, km) - flat threshold
     if exchange in OTHER_SUB_EXCHANGES:
         return OTHER_SUB_EXCHANGE_THRESHOLD
 

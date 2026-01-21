@@ -68,7 +68,6 @@ class CachedPosition:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Tracking
-    hunting_score: Optional[float] = None
     is_in_watchlist: bool = False
 
     @classmethod
@@ -123,7 +122,6 @@ class CachedPosition:
             last_full_refresh=now,
             last_price_update=now,
             created_at=now,
-            hunting_score=pos.get('hunting_score'),
             is_in_watchlist=pos.get('is_in_watchlist', False),
         )
 
@@ -150,7 +148,6 @@ class CachedPosition:
             'last_full_refresh': self.last_full_refresh.isoformat(),
             'last_price_update': self.last_price_update.isoformat(),
             'created_at': self.created_at.isoformat(),
-            'hunting_score': self.hunting_score,
             'is_in_watchlist': self.is_in_watchlist,
         }
 
@@ -178,7 +175,6 @@ class CachedPosition:
             last_full_refresh=datetime.fromisoformat(d['last_full_refresh']) if isinstance(d['last_full_refresh'], str) else d['last_full_refresh'],
             last_price_update=datetime.fromisoformat(d['last_price_update']) if isinstance(d['last_price_update'], str) else d['last_price_update'],
             created_at=datetime.fromisoformat(d['created_at']) if isinstance(d['created_at'], str) else d['created_at'],
-            hunting_score=d.get('hunting_score'),
             is_in_watchlist=d.get('is_in_watchlist', False),
         )
 

@@ -254,7 +254,7 @@ class MonitorService:
         Returns:
             Tuple of (filtered_count, sanitized_count)
         """
-        known_exchanges = {"xyz", "flx", "vntl", "hyna", "km"}
+        known_exchanges = {"xyz", "flx", "hyna", "km"}
         positions_to_remove = []
         positions_to_update = []
         sanitized_count = 0
