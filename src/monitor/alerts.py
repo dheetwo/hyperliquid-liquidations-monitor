@@ -704,7 +704,9 @@ class TelegramAlerts:
         hypurrscan_url = f"https://hypurrscan.io/address/{addr}"
 
         lines = [
-            f"💰 COLLATERAL ADDED on {token_display}: Liq Distance: {old_distance:.2f}% → {new_distance:.2f}%",
+            f"💰 COLLATERAL ADDED on {token_display}:",
+            "",
+            f"Liq Distance increased to <b>{new_distance:.2f}%</b>",
             f"{token_display} | {side_str} | {value_str} | {margin_type}",
             f"<a href=\"{hypurrscan_url}\">{addr[:6]}...{addr[-4:]}</a>",
         ]
@@ -869,6 +871,7 @@ class TelegramAlerts:
         position_value: float,
         is_isolated: bool = False,
         exchange: str = "main",
+        previous_distance: Optional[float] = None,
         alert_time: datetime = None
     ) -> Optional[int]:
         """
@@ -884,6 +887,7 @@ class TelegramAlerts:
             position_value: Position value in USD
             is_isolated: Whether isolated margin
             exchange: Exchange name (default: "main")
+            previous_distance: Distance at last daily summary (for showing change)
             alert_time: Alert timestamp
 
         Returns:
@@ -927,13 +931,10 @@ class TelegramAlerts:
         lines = [
             "🟠 APPROACHING LIQUIDATION",
             "",
-            f"{token_display} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} Price: {format_price(mark_price)}, Liq. Price: {format_price(liq_price)}",
+            "",
+            f"{token_display} | {side_str} | {value_str} | {margin_type} | 🟠 <b>{distance_pct:.2f}%</b>",
             f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
-            "",
-            f"Liquidation Distance: <b>{distance_pct:.2f}%</b>",
-            f"Liq. Price: {format_price(liq_price)} | Current: {format_price(mark_price)}",
-            "",
-            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
         ]
 
         message = "\n".join(lines)
@@ -955,6 +956,7 @@ class TelegramAlerts:
         position_value: float,
         is_isolated: bool = False,
         exchange: str = "main",
+        previous_distance: Optional[float] = None,
         alert_time: datetime = None
     ) -> Optional[int]:
         """
@@ -970,6 +972,7 @@ class TelegramAlerts:
             position_value: Position value in USD
             is_isolated: Whether isolated margin
             exchange: Exchange name (default: "main")
+            previous_distance: Distance at last daily summary (for showing change)
             alert_time: Alert timestamp
 
         Returns:
@@ -1008,13 +1011,10 @@ class TelegramAlerts:
         lines = [
             "🚨 IMMINENT LIQUIDATION",
             "",
-            f"{token_display} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} Price: {format_price(mark_price)}, Liq. Price: {format_price(liq_price)}",
+            "",
+            f"{token_display} | {side_str} | {value_str} | {margin_type} | 🚨 <b>{distance_pct:.3f}%</b>",
             f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
-            "",
-            f"Liquidation Distance: <b>{distance_pct:.3f}%</b>",
-            f"Liq. Price: {format_price(liq_price)} | Current: {format_price(mark_price)}",
-            "",
-            f"{alert_time_et.strftime('%H:%M:%S %Z')}",
         ]
 
         message = "\n".join(lines)
@@ -1327,7 +1327,14 @@ def send_daily_summary(
     lines.append(header)
 
     message = "\n".join(lines)
-    return alerts._send_message(message)
+    message_id = alerts._send_message(message)
+
+    # Update distance_at_last_summary for all positions in cache
+    # This captures the current distance so proximity alerts can show the change since last summary
+    for pos in position_cache.positions.values():
+        pos.distance_at_last_summary = pos.distance_pct
+
+    return message_id
 
 
 def send_test_alert(

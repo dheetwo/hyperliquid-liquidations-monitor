@@ -716,6 +716,7 @@ class MonitorService:
                     mark_price=pos.mark_price,
                     position_value=pos.position_value,
                     is_isolated=(pos.leverage_type.lower() == 'isolated' or pos.exchange != 'main'),
+                    previous_distance=pos.distance_at_last_summary,
                 )
                 alert_state['alerted_critical'] = True
                 alert_state['in_critical_zone'] = True
@@ -732,6 +733,7 @@ class MonitorService:
                     mark_price=pos.mark_price,
                     position_value=pos.position_value,
                     is_isolated=(pos.leverage_type.lower() == 'isolated' or pos.exchange != 'main'),
+                    previous_distance=pos.distance_at_last_summary,
                 )
                 alert_state['alerted_proximity'] = True
                 alert_state['in_critical_zone'] = True
