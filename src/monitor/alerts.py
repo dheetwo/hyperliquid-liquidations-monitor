@@ -463,6 +463,13 @@ class TelegramAlerts:
         addr = position.address
         addr_display = f"{addr[:6]}...{addr[-4:]}"
 
+        # Build token display with exchange prefix if not main
+        exchange = getattr(position, 'exchange', 'main')
+        if exchange and exchange != 'main':
+            token_display = f"{exchange}:{position.token}"
+        else:
+            token_display = position.token
+
         # Build address line with cohort tags after
         if cohort_str:
             addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
@@ -470,9 +477,9 @@ class TelegramAlerts:
             addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a>"
 
         lines = [
-            "APPROACHING LIQUIDATION",
+            "🟠 APPROACHING LIQUIDATION",
             "",
-            f"{position.token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             addr_line,
             "",
             f"Liquidation Distance: {previous_distance:.2f}% -> <b>{position.last_distance_pct:.2f}%</b>",
@@ -541,6 +548,13 @@ class TelegramAlerts:
         addr = position.address
         addr_display = f"{addr[:6]}...{addr[-4:]}"
 
+        # Build token display with exchange prefix if not main
+        exchange = getattr(position, 'exchange', 'main')
+        if exchange and exchange != 'main':
+            token_display = f"{exchange}:{position.token}"
+        else:
+            token_display = position.token
+
         # Build address line with cohort tags after
         if cohort_str:
             addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
@@ -550,7 +564,7 @@ class TelegramAlerts:
         lines = [
             "🚨 IMMINENT LIQUIDATION",
             "",
-            f"{position.token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             addr_line,
             "",
             f"Liquidation Distance: {previous_distance:.3f}% -> <b>{position.last_distance_pct:.3f}%</b>",
@@ -612,6 +626,13 @@ class TelegramAlerts:
         addr = position.address
         addr_display = f"{addr[:6]}...{addr[-4:]}"
 
+        # Build token display with exchange prefix if not main
+        exchange = getattr(position, 'exchange', 'main')
+        if exchange and exchange != 'main':
+            token_display = f"{exchange}:{position.token}"
+        else:
+            token_display = position.token
+
         # Build address line with cohort tags after
         if cohort_str:
             addr_line = f"<a href=\"{hypurrscan_url}\">{addr_display}</a> ({cohort_str})"
@@ -621,7 +642,7 @@ class TelegramAlerts:
         lines = [
             "✅ POSITION RECOVERED",
             "",
-            f"{position.token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             addr_line,
             "",
             f"Liquidation Distance: {previous_distance:.3f}% -> <b>{position.last_distance_pct:.2f}%</b>",
@@ -847,6 +868,7 @@ class TelegramAlerts:
         mark_price: float,
         position_value: float,
         is_isolated: bool = False,
+        exchange: str = "main",
         alert_time: datetime = None
     ) -> Optional[int]:
         """
@@ -861,12 +883,13 @@ class TelegramAlerts:
             mark_price: Current mark price
             position_value: Position value in USD
             is_isolated: Whether isolated margin
+            exchange: Exchange name (default: "main")
             alert_time: Alert timestamp
 
         Returns:
             message_id if sent successfully, None otherwise
         """
-        position_key = f"{address}:{token}:main:{side}"
+        position_key = f"{address}:{token}:{exchange}:{side}"
         if not self._can_alert_position(position_key):
             logger.debug(f"Proximity alert for {token} skipped (cooldown)")
             return None
@@ -878,6 +901,12 @@ class TelegramAlerts:
 
         side_str = "L" if side == "Long" else "S"
         margin_type = "Iso" if is_isolated else "Cross"
+
+        # Build token display with exchange prefix if not main
+        if exchange and exchange != "main":
+            token_display = f"{exchange}:{token}"
+        else:
+            token_display = token
 
         if position_value >= 1_000_000:
             value_str = f"${position_value / 1_000_000:.1f}M"
@@ -896,9 +925,9 @@ class TelegramAlerts:
         addr_display = f"{address[:6]}...{address[-4:]}"
 
         lines = [
-            "APPROACHING LIQUIDATION",
+            "🟠 APPROACHING LIQUIDATION",
             "",
-            f"{token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
             "",
             f"Liquidation Distance: <b>{distance_pct:.2f}%</b>",
@@ -925,6 +954,7 @@ class TelegramAlerts:
         mark_price: float,
         position_value: float,
         is_isolated: bool = False,
+        exchange: str = "main",
         alert_time: datetime = None
     ) -> Optional[int]:
         """
@@ -939,6 +969,7 @@ class TelegramAlerts:
             mark_price: Current mark price
             position_value: Position value in USD
             is_isolated: Whether isolated margin
+            exchange: Exchange name (default: "main")
             alert_time: Alert timestamp
 
         Returns:
@@ -951,6 +982,12 @@ class TelegramAlerts:
 
         side_str = "L" if side == "Long" else "S"
         margin_type = "Iso" if is_isolated else "Cross"
+
+        # Build token display with exchange prefix if not main
+        if exchange and exchange != "main":
+            token_display = f"{exchange}:{token}"
+        else:
+            token_display = token
 
         if position_value >= 1_000_000:
             value_str = f"${position_value / 1_000_000:.1f}M"
@@ -971,7 +1008,7 @@ class TelegramAlerts:
         lines = [
             "🚨 IMMINENT LIQUIDATION",
             "",
-            f"{token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
             "",
             f"Liquidation Distance: <b>{distance_pct:.3f}%</b>",
@@ -993,6 +1030,7 @@ class TelegramAlerts:
         mark_price: float,
         position_value: float,
         is_isolated: bool = False,
+        exchange: str = "main",
         alert_time: datetime = None
     ) -> Optional[int]:
         """
@@ -1007,6 +1045,7 @@ class TelegramAlerts:
             mark_price: Current mark price
             position_value: Position value in USD
             is_isolated: Whether isolated margin
+            exchange: Exchange name (default: "main")
             alert_time: Alert timestamp
 
         Returns:
@@ -1019,6 +1058,12 @@ class TelegramAlerts:
 
         side_str = "L" if side == "Long" else "S"
         margin_type = "Iso" if is_isolated else "Cross"
+
+        # Build token display with exchange prefix if not main
+        if exchange and exchange != "main":
+            token_display = f"{exchange}:{token}"
+        else:
+            token_display = token
 
         if position_value >= 1_000_000:
             value_str = f"${position_value / 1_000_000:.1f}M"
@@ -1039,7 +1084,7 @@ class TelegramAlerts:
         lines = [
             "✅ POSITION RECOVERED",
             "",
-            f"{token} | {side_str} | {value_str} | {margin_type}",
+            f"{token_display} | {side_str} | {value_str} | {margin_type}",
             f"<a href=\"{hypurrscan_url}\">{addr_display}</a>",
             "",
             f"Liquidation Distance: <b>{distance_pct:.2f}%</b>",
