@@ -1100,7 +1100,10 @@ class TelegramAlerts:
 def send_daily_summary(
     position_cache: "PositionCache",
     alerts: TelegramAlerts,
-    discovery_scheduler: "DiscoveryScheduler"
+    discovery_scheduler: "DiscoveryScheduler",
+    scheduled_hour: int = 7,
+    scheduled_minute: int = 0,
+    scan_stats: Dict[str, int] = None
 ) -> Optional[int]:
     """
     Send daily watchlist summary to Telegram.
@@ -1111,6 +1114,9 @@ def send_daily_summary(
         position_cache: PositionCache with current positions
         alerts: TelegramAlerts instance
         discovery_scheduler: DiscoveryScheduler for discovery interval info
+        scheduled_hour: Hour of scheduled summary (24h format)
+        scheduled_minute: Minute of scheduled summary
+        scan_stats: Filter statistics from last scan
 
     Returns:
         message_id if sent successfully, None otherwise
@@ -1139,16 +1145,26 @@ def send_daily_summary(
     normal = positions_by_tier['normal']
 
     def format_token_with_exchange(token: str, exchange: str) -> str:
-        """Add exchange prefix for sub-exchanges."""
+        """Add exchange prefix for sub-exchanges, stripping any existing prefix first."""
+        # Strip existing exchange prefix if present (handles corrupted data like "flx:XMR")
+        known_exchanges = {"xyz", "flx", "vntl", "hyna", "km"}
+        if ":" in token:
+            prefix, rest = token.split(":", 1)
+            if prefix in known_exchanges:
+                token = rest  # Use the part after the prefix
+
         if exchange != "main":
             return f"{exchange}:{token}"
         return token
 
-    # Build message - header without timestamp (moved to end)
-    lines = [
-        "LIQUIDATION WATCHLIST SUMMARY",
-        "",
-    ]
+    # Build header with scheduled time (e.g., "9:00 AM WATCHLIST")
+    period = "AM" if scheduled_hour < 12 else "PM"
+    display_hour = scheduled_hour if scheduled_hour <= 12 else scheduled_hour - 12
+    if display_hour == 0:
+        display_hour = 12
+    header = f"{display_hour}:{scheduled_minute:02d} {period} WATCHLIST"
+
+    lines = []
 
     # Critical section - single line per position
     if critical:
@@ -1161,7 +1177,7 @@ def send_daily_summary(
             token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
-            margin_type = "Iso" if pos.leverage_type == "Isolated" else "Cross"
+            margin_type = "Iso" if pos.leverage_type == "Isolated" or pos.exchange != "main" else "Cross"
             dist_str = f"{pos.distance_pct:.3f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
             formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
@@ -1190,7 +1206,7 @@ def send_daily_summary(
             token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
-            margin_type = "Iso" if pos.leverage_type == "Isolated" else "Cross"
+            margin_type = "Iso" if pos.leverage_type == "Isolated" or pos.exchange != "main" else "Cross"
             dist_str = f"{pos.distance_pct:.3f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
             formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
@@ -1221,7 +1237,7 @@ def send_daily_summary(
             token_display = format_token_with_exchange(pos.token, pos.exchange)
             value_str = f"${pos.position_value / 1_000_000:.1f}M" if pos.position_value >= 1_000_000 else f"${pos.position_value / 1_000:.0f}K"
             side_char = "L" if pos.side == "Long" else "S"
-            margin_type = "Iso" if pos.leverage_type == "Isolated" else "Cross"
+            margin_type = "Iso" if pos.leverage_type == "Isolated" or pos.exchange != "main" else "Cross"
             dist_str = f"{pos.distance_pct:.2f}%"
             addr_short = f"{pos.address[:6]}...{pos.address[-4:]}"
             formatted.append((token_display, side_char, value_str, margin_type, dist_str, addr_short, pos.address))
@@ -1238,8 +1254,32 @@ def send_daily_summary(
             lines.append(f"<a href=\"{hypurrscan_url}\">{addr_short}</a> <code>{row}</code>")
         lines.append("")
 
-    # Timestamp at end
-    lines.append(f"{now.strftime('%Y-%m-%d %I:%M:%S %p')} EST")
+    # Add scan statistics after positions
+    if scan_stats and scan_stats.get('total_positions', 0) > 0:
+        total = scan_stats['total_positions']
+        no_liq = scan_stats.get('no_liq_price', 0)
+        below_notional = scan_stats.get('below_notional', 0)
+        distance_far = scan_stats.get('distance_too_far', 0)
+        passed = scan_stats.get('passed_filters', 0)
+
+        # Multi-filter combinations
+        no_liq_notional = scan_stats.get('no_liq_and_below_notional', 0)
+        no_liq_dist = scan_stats.get('no_liq_and_distance', 0)
+        notional_dist = scan_stats.get('below_notional_and_distance', 0)
+        all_three = scan_stats.get('all_three_filters', 0)
+        multi_filter_total = no_liq_notional + no_liq_dist + notional_dist + all_three
+
+        lines.append(f"📊 Scanned: {total:,} positions")
+        lines.append(f"├ No liq price: {no_liq:,}")
+        lines.append(f"├ Below threshold: {below_notional:,}")
+        lines.append(f"├ Distance >5%: {distance_far:,}")
+        if multi_filter_total > 0:
+            lines.append(f"├ Multiple filters: {multi_filter_total:,}")
+        lines.append(f"└ Monitoring: {passed:,}")
+        lines.append("")
+
+    # Add header at the end
+    lines.append(header)
 
     message = "\n".join(lines)
     return alerts._send_message(message)

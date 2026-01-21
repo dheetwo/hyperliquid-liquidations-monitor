@@ -60,7 +60,7 @@ CACHE_PRUNE_AGE_HOURS = 24   # Delete positions not refreshed in 24h
 
 # Times for daily summary messages (24h format, EST)
 DAILY_SUMMARY_TIMES = [
-    (7, 0),   # 7:00 AM EST
+    (9, 0),   # 9:00 AM EST
     (16, 0),  # 4:00 PM EST
 ]
 
@@ -106,7 +106,7 @@ MAIN_THRESHOLDS_CROSS = {
     "TIER1_ALTS": 25_000_000,     # $25M - SOL, BNB, XRP
     "TIER2_ALTS": 10_000_000,     # $10M - DOGE, ADA, AVAX, etc.
     "MID_ALTS": 5_000_000,        # $5M - APT, ARB, memes, DeFi, etc.
-    "SMALL_CAPS": 1_000_000,      # $1M - everything else
+    "SMALL_CAPS": 1_500_000,      # $1.5M - everything else
 }
 
 # Legacy compatibility
@@ -235,6 +235,11 @@ MIN_HUNTING_SCORE = 0
 
 # Maximum distance (%) to include in watchlist - positions farther won't be monitored
 MAX_WATCH_DISTANCE_PCT = 5.0
+
+# Minimum wallet position value to fetch positions for
+# Wallets with total notional below this are skipped entirely (saves API calls)
+# Matches lowest position threshold ($300K isolated small caps)
+MIN_WALLET_POSITION_VALUE = 300_000  # $300K
 
 # Minimum notional thresholds are now defined via token classification above.
 # Use get_watchlist_threshold() function to get the threshold for a given token.

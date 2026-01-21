@@ -67,6 +67,8 @@ from config.monitor_settings import (
     CRITICAL_ALERT_PCT,
     RECOVERY_PCT,
     COHORT_DATA_PATH,
+    MAX_WATCH_DISTANCE_PCT,
+    MIN_WALLET_POSITION_VALUE,
     get_watchlist_threshold,
 )
 
@@ -170,6 +172,16 @@ class MonitorService:
         # Alert tracking for proximity alerts
         self._alerted_positions: Dict[str, dict] = {}  # position_key -> alert state
 
+        # Filter statistics from last scan (for daily summary)
+        self._last_scan_stats: Dict[str, int] = {
+            'total_positions': 0,
+            'no_liq_price': 0,
+            'distance_too_far': 0,
+            'below_notional': 0,
+            'multiple_filters': 0,
+            'passed_filters': 0,
+        }
+
         # Signal handling for graceful shutdown
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -204,6 +216,16 @@ class MonitorService:
                 logger.info(f"Cache too old ({age_minutes:.1f} min > {CACHE_MAX_AGE_MINUTES} min), initial scan required")
                 return False
 
+            # Filter cached positions against current thresholds and sanitize tokens
+            filtered_count, sanitized_count = self._filter_and_sanitize_cached_positions()
+            remaining = len(self.position_cache.positions)
+
+            if filtered_count > 0 or sanitized_count > 0:
+                logger.info(
+                    f"Cache cleanup: {filtered_count} positions removed (below threshold), "
+                    f"{sanitized_count} tokens sanitized, {remaining} positions remaining"
+                )
+
             # Load known addresses
             self.discovery_scheduler.load_known_addresses()
             self.discovery_scheduler.restore_last_discovery()
@@ -212,7 +234,7 @@ class MonitorService:
             self._restore_alert_state()
 
             logger.info(
-                f"Restored from cache: {loaded} positions, "
+                f"Restored from cache: {remaining} positions, "
                 f"cache age: {age_minutes:.1f} min"
             )
             return True
@@ -220,6 +242,74 @@ class MonitorService:
         except Exception as e:
             logger.warning(f"Failed to restore from cache: {e}, initial scan required")
             return False
+
+    def _filter_and_sanitize_cached_positions(self) -> tuple:
+        """
+        Filter cached positions against current thresholds and sanitize token names.
+
+        Filters by:
+        - Notional threshold (based on token tier)
+        - Distance to liquidation (MAX_WATCH_DISTANCE_PCT)
+
+        Returns:
+            Tuple of (filtered_count, sanitized_count)
+        """
+        known_exchanges = {"xyz", "flx", "vntl", "hyna", "km"}
+        positions_to_remove = []
+        positions_to_update = []
+        sanitized_count = 0
+
+        for key, pos in list(self.position_cache.positions.items()):
+            # Sanitize token: strip exchange prefix if present (fixes "flx:XMR" -> "XMR")
+            if ":" in pos.token:
+                prefix, rest = pos.token.split(":", 1)
+                if prefix in known_exchanges:
+                    pos.token = rest
+                    # Update position_key to match new token
+                    old_key = pos.position_key
+                    pos.position_key = f"{pos.address}:{pos.token}:{pos.exchange}:{pos.side}"
+                    positions_to_update.append((old_key, pos))
+                    sanitized_count += 1
+
+            # Check against current notional threshold
+            # Sub-exchanges (xyz, flx, etc.) are always isolated regardless of leverage_type
+            is_isolated = pos.leverage_type.lower() == "isolated" or pos.exchange != "main"
+            if not passes_watchlist_threshold(
+                token=pos.token,
+                exchange=pos.exchange,
+                is_isolated=is_isolated,
+                position_value=pos.position_value
+            ):
+                positions_to_remove.append(key)
+                continue
+
+            # Check against distance threshold
+            if pos.distance_pct is not None and pos.distance_pct > MAX_WATCH_DISTANCE_PCT:
+                positions_to_remove.append(key)
+
+        # Remove positions that don't meet thresholds
+        for key in positions_to_remove:
+            self.position_cache.remove_position(key)
+
+        # Update sanitized positions in cache and database
+        for old_key, pos in positions_to_update:
+            if old_key in positions_to_remove:
+                continue  # Skip if already removed due to threshold
+            # Remove old key and add with new key
+            if old_key in self.position_cache.positions:
+                del self.position_cache.positions[old_key]
+                # Remove old tier entry
+                for tier in self.position_cache.tier_queues:
+                    if old_key in self.position_cache.tier_queues[tier]:
+                        self.position_cache.tier_queues[tier].remove(old_key)
+            # Add with corrected key
+            self.position_cache.positions[pos.position_key] = pos
+            self.position_cache.tier_queues[pos.refresh_tier].append(pos.position_key)
+            # Persist to database (save new, delete old)
+            self.db.save_cached_position(pos.to_dict())
+            self.db.delete_cached_positions([old_key])
+
+        return len(positions_to_remove), sanitized_count
 
     def _restore_alert_state(self):
         """Restore proximity alert state from database."""
@@ -253,6 +343,12 @@ class MonitorService:
             logger.error(f"Cohort fetch error: {e}")
             raise
 
+        # Filter traders by minimum position value (saves API calls)
+        total_traders = len(traders)
+        traders = [t for t in traders if t.position_value >= MIN_WALLET_POSITION_VALUE]
+        filtered_out = total_traders - len(traders)
+        logger.info(f"Filtered wallets: {filtered_out} below ${MIN_WALLET_POSITION_VALUE/1_000_000:.2f}M threshold, {len(traders)} remaining")
+
         # Build address list with cohorts (already in priority order from fetch_cohorts)
         addresses = [(t.address, t.cohort) for t in traders]
 
@@ -284,10 +380,24 @@ class MonitorService:
             logger.error(f"Position fetch error: {e}")
             raise
 
-        # Step 4: Populate cache (with notional threshold filtering)
+        # Step 4: Populate cache (with filtering and statistics tracking)
         logger.info("Step 4: Populating position cache...")
         cached_positions = []
-        filtered_by_notional = 0
+
+        # Track filter statistics
+        stats = {
+            'total_positions': len(positions),
+            'no_liq_price': 0,
+            'below_notional': 0,
+            'distance_too_far': 0,
+            # Multi-filter combinations
+            'no_liq_and_below_notional': 0,
+            'no_liq_and_distance': 0,
+            'below_notional_and_distance': 0,
+            'all_three_filters': 0,
+            'passed_filters': 0,
+        }
+
         for pos in positions:
             # Get mark price for this position
             token = pos.token
@@ -295,16 +405,52 @@ class MonitorService:
             price = get_current_price(token, exchange, mark_prices)
 
             if price and price > 0:
-                # Check notional threshold before adding to cache
-                if not passes_watchlist_threshold(
+                # Track filter reasons
+                has_no_liq = pos.liquidation_price is None
+                below_notional = not passes_watchlist_threshold(
                     token=token,
                     exchange=exchange,
                     is_isolated=pos.is_isolated,
                     position_value=pos.position_value
-                ):
-                    filtered_by_notional += 1
+                )
+
+                # Calculate distance for distance filter
+                distance_too_far = False
+                if not has_no_liq and pos.liquidation_price and pos.liquidation_price > 0:
+                    if pos.side.lower() == "long":
+                        distance_pct = ((price - pos.liquidation_price) / price) * 100
+                    else:  # short
+                        distance_pct = ((pos.liquidation_price - price) / price) * 100
+                    distance_too_far = distance_pct > MAX_WATCH_DISTANCE_PCT
+                elif has_no_liq:
+                    # No liq price means infinite distance (already filtered by has_no_liq)
+                    distance_too_far = False  # Don't double-count
+
+                # Count filter combinations
+                filters_applied = sum([has_no_liq, below_notional, distance_too_far])
+
+                if filters_applied == 3:
+                    stats['all_three_filters'] += 1
+                    continue
+                elif filters_applied == 2:
+                    if has_no_liq and below_notional:
+                        stats['no_liq_and_below_notional'] += 1
+                    elif has_no_liq and distance_too_far:
+                        stats['no_liq_and_distance'] += 1
+                    elif below_notional and distance_too_far:
+                        stats['below_notional_and_distance'] += 1
+                    continue
+                elif filters_applied == 1:
+                    if has_no_liq:
+                        stats['no_liq_price'] += 1
+                    elif below_notional:
+                        stats['below_notional'] += 1
+                    elif distance_too_far:
+                        stats['distance_too_far'] += 1
                     continue
 
+                # Position passes all filters
+                stats['passed_filters'] += 1
                 cached = CachedPosition.from_position_dict(
                     vars(pos) if hasattr(pos, '__dict__') else pos,
                     pos.cohort,
@@ -312,7 +458,20 @@ class MonitorService:
                 )
                 cached_positions.append(cached)
 
-        logger.info(f"Filtered {filtered_by_notional} positions below notional threshold")
+        # Store stats for daily summary
+        self._last_scan_stats = stats
+
+        # Calculate totals for logging
+        single_filter = stats['no_liq_price'] + stats['below_notional'] + stats['distance_too_far']
+        multi_filter = (stats['no_liq_and_below_notional'] + stats['no_liq_and_distance'] +
+                        stats['below_notional_and_distance'] + stats['all_three_filters'])
+
+        logger.info(f"Filter stats: {stats['total_positions']} total, "
+                   f"{stats['no_liq_price']} no liq, "
+                   f"{stats['below_notional']} below notional, "
+                   f"{stats['distance_too_far']} distance >{MAX_WATCH_DISTANCE_PCT}%, "
+                   f"{multi_filter} multi-filter, "
+                   f"{stats['passed_filters']} passed")
 
         # Batch save to cache
         self.position_cache.update_positions_batch(cached_positions)
@@ -494,7 +653,7 @@ class MonitorService:
                     liq_price=pos.liq_price,
                     mark_price=pos.mark_price,
                     position_value=pos.position_value,
-                    is_isolated=(pos.leverage_type == 'isolated'),
+                    is_isolated=(pos.leverage_type.lower() == 'isolated' or pos.exchange != 'main'),
                 )
                 alert_state['alerted_proximity'] = False
                 alert_state['alerted_critical'] = False
@@ -511,7 +670,7 @@ class MonitorService:
                     liq_price=pos.liq_price,
                     mark_price=pos.mark_price,
                     position_value=pos.position_value,
-                    is_isolated=(pos.leverage_type == 'isolated'),
+                    is_isolated=(pos.leverage_type.lower() == 'isolated' or pos.exchange != 'main'),
                 )
                 alert_state['alerted_critical'] = True
                 alert_state['in_critical_zone'] = True
@@ -527,7 +686,7 @@ class MonitorService:
                     liq_price=pos.liq_price,
                     mark_price=pos.mark_price,
                     position_value=pos.position_value,
-                    is_isolated=(pos.leverage_type == 'isolated'),
+                    is_isolated=(pos.leverage_type.lower() == 'isolated' or pos.exchange != 'main'),
                 )
                 alert_state['alerted_proximity'] = True
                 alert_state['in_critical_zone'] = True
@@ -544,6 +703,9 @@ class MonitorService:
         try:
             # Fetch current cohorts
             traders = fetch_cohorts(ALL_COHORTS, delay=1.0)
+
+            # Filter traders by minimum position value (saves API calls)
+            traders = [t for t in traders if t.position_value >= MIN_WALLET_POSITION_VALUE]
             current_addresses = [(t.address, t.cohort) for t in traders]
 
             # Find new addresses
@@ -560,7 +722,7 @@ class MonitorService:
             mark_prices = fetch_all_mark_prices_async(ALL_DEXES)
             positions = fetch_all_positions_async(new_addresses, mark_prices, dexes=ALL_DEXES)
 
-            # Add to cache (with notional threshold filtering)
+            # Add to cache (with filtering: liq price, notional, distance)
             added_count = 0
             filtered_count = 0
             for pos in positions:
@@ -569,7 +731,12 @@ class MonitorService:
                 price = get_current_price(token, exchange, mark_prices)
 
                 if price and price > 0:
-                    # Check notional threshold before adding to cache
+                    # Filter: must have liquidation price
+                    if pos.liquidation_price is None:
+                        filtered_count += 1
+                        continue
+
+                    # Filter: notional threshold
                     if not passes_watchlist_threshold(
                         token=token,
                         exchange=exchange,
@@ -578,6 +745,16 @@ class MonitorService:
                     ):
                         filtered_count += 1
                         continue
+
+                    # Filter: distance threshold
+                    if pos.liquidation_price and pos.liquidation_price > 0:
+                        if pos.side.lower() == "long":
+                            distance_pct = ((price - pos.liquidation_price) / price) * 100
+                        else:
+                            distance_pct = ((pos.liquidation_price - price) / price) * 100
+                        if distance_pct > MAX_WATCH_DISTANCE_PCT:
+                            filtered_count += 1
+                            continue
 
                     cached = CachedPosition.from_position_dict(
                         vars(pos) if hasattr(pos, '__dict__') else pos,
@@ -618,14 +795,21 @@ class MonitorService:
             # Check if we're past the summary time
             summary_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if now >= summary_time:
-                self._send_daily_summary()
+                self._send_daily_summary(hour, minute)
                 self._summaries_sent_today.add(summary_key)
                 logger.info(f"Sent daily summary for {hour:02d}:{minute:02d} EST")
 
-    def _send_daily_summary(self):
+    def _send_daily_summary(self, scheduled_hour: int, scheduled_minute: int):
         """Send the daily watchlist summary to Telegram."""
         from .alerts import send_daily_summary
-        send_daily_summary(self.position_cache, self.alerts, self.discovery_scheduler)
+        send_daily_summary(
+            self.position_cache,
+            self.alerts,
+            self.discovery_scheduler,
+            scheduled_hour,
+            scheduled_minute,
+            self._last_scan_stats
+        )
 
     def _record_position_snapshots(self):
         """Record position snapshots for history tracking (throttled)."""
