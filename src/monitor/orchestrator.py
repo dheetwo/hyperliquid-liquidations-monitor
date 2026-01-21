@@ -670,11 +670,9 @@ class MonitorService:
                 continue
 
             # Check watchlist threshold
-            threshold = get_watchlist_threshold(
-                pos.token,
-                pos.exchange,
-                pos.leverage_type == 'isolated'
-            )
+            # Sub-exchanges are always isolated, regardless of leverage_type
+            is_isolated = pos.leverage_type.lower() == 'isolated' or pos.exchange != 'main'
+            threshold = get_watchlist_threshold(pos.token, pos.exchange, is_isolated)
             if pos.position_value < threshold:
                 continue
 
