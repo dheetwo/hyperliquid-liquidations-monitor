@@ -76,6 +76,35 @@ EST = pytz.timezone('America/New_York')
 logger = logging.getLogger(__name__)
 
 
+def passes_watchlist_threshold(
+    token: str,
+    exchange: str,
+    is_isolated: bool,
+    position_value: float
+) -> bool:
+    """
+    Check if a position meets the minimum notional threshold for monitoring.
+
+    Uses tier-based thresholds from monitor_settings.py:
+    - Main exchange: BTC $100M, ETH $75M, tier1 $25M, tier2 $10M, etc.
+    - XYZ exchange: Indices $5M, mega equities $3M, etc.
+    - Other sub-exchanges: Flat $500K
+
+    Isolated positions use lower thresholds (cross_threshold / 5).
+
+    Args:
+        token: Token symbol (e.g., "BTC", "ETH", "DOGE")
+        exchange: Exchange name ("main", "xyz", "flx", etc.)
+        is_isolated: Whether the position uses isolated margin
+        position_value: Position notional value in USD
+
+    Returns:
+        True if position meets threshold, False otherwise
+    """
+    threshold = get_watchlist_threshold(token, exchange, is_isolated)
+    return position_value >= threshold
+
+
 class MonitorService:
     """
     Continuous monitoring service for liquidation hunting.
@@ -255,9 +284,10 @@ class MonitorService:
             logger.error(f"Position fetch error: {e}")
             raise
 
-        # Step 4: Populate cache
+        # Step 4: Populate cache (with notional threshold filtering)
         logger.info("Step 4: Populating position cache...")
         cached_positions = []
+        filtered_by_notional = 0
         for pos in positions:
             # Get mark price for this position
             token = pos.token
@@ -265,12 +295,24 @@ class MonitorService:
             price = get_current_price(token, exchange, mark_prices)
 
             if price and price > 0:
+                # Check notional threshold before adding to cache
+                if not passes_watchlist_threshold(
+                    token=token,
+                    exchange=exchange,
+                    is_isolated=pos.is_isolated,
+                    position_value=pos.position_value
+                ):
+                    filtered_by_notional += 1
+                    continue
+
                 cached = CachedPosition.from_position_dict(
                     vars(pos) if hasattr(pos, '__dict__') else pos,
                     pos.cohort,
                     price
                 )
                 cached_positions.append(cached)
+
+        logger.info(f"Filtered {filtered_by_notional} positions below notional threshold")
 
         # Batch save to cache
         self.position_cache.update_positions_batch(cached_positions)
@@ -518,24 +560,40 @@ class MonitorService:
             mark_prices = fetch_all_mark_prices_async(ALL_DEXES)
             positions = fetch_all_positions_async(new_addresses, mark_prices, dexes=ALL_DEXES)
 
-            # Add to cache
+            # Add to cache (with notional threshold filtering)
+            added_count = 0
+            filtered_count = 0
             for pos in positions:
                 token = pos.token
                 exchange = pos.exchange
                 price = get_current_price(token, exchange, mark_prices)
 
                 if price and price > 0:
+                    # Check notional threshold before adding to cache
+                    if not passes_watchlist_threshold(
+                        token=token,
+                        exchange=exchange,
+                        is_isolated=pos.is_isolated,
+                        position_value=pos.position_value
+                    ):
+                        filtered_count += 1
+                        continue
+
                     cached = CachedPosition.from_position_dict(
                         vars(pos) if hasattr(pos, '__dict__') else pos,
                         pos.cohort,
                         price
                     )
                     self.position_cache.update_position(cached)
+                    added_count += 1
 
             # Mark discovery complete
             self.discovery_scheduler.mark_discovery_complete(new_addresses)
 
-            logger.info(f"Discovery complete: added {len(positions)} positions from {len(new_addresses)} new addresses")
+            logger.info(
+                f"Discovery complete: added {added_count} positions from {len(new_addresses)} new addresses "
+                f"({filtered_count} filtered by notional threshold)"
+            )
 
         except Exception as e:
             logger.error(f"Discovery scan failed: {e}")
