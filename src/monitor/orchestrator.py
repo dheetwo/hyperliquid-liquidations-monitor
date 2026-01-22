@@ -76,6 +76,8 @@ from config.monitor_settings import (
     MIN_WALLET_POSITION_VALUE,
     WALLET_ACTIVE_THRESHOLD,
     INFREQUENT_SCAN_INTERVAL_HOURS,
+    MARK_PRICE_FETCH_MAIN_SEC,
+    MARK_PRICE_FETCH_SUB_SEC,
     get_watchlist_threshold,
 )
 
@@ -628,7 +630,7 @@ class MonitorService:
         Continuous main loop with tiered refresh and dynamic discovery.
 
         1. Check for daily summary
-        2. Fetch mark prices (single API call)
+        2. Fetch mark prices (tiered: main more often, sub-exchanges less often)
         3. Update cache with new prices
         4. Process tiered refresh queue
         5. Check proximity alerts
@@ -636,30 +638,48 @@ class MonitorService:
         """
         logger.info("Entering main monitoring loop...")
 
-        last_price_fetch = 0
-        price_fetch_interval = 1.0  # Fetch prices every second
+        # Tiered price fetching: main exchange more often, sub-exchanges less often
+        last_price_fetch_main = 0
+        last_price_fetch_sub = 0
+        mark_prices = {}  # Running merged price dict
+
+        # Define exchanges
+        main_dex = [""]  # Main Hyperliquid exchange
+        sub_dexes = ["xyz", "flx", "hyna", "km"]  # Lower volume exchanges
 
         while self.running:
             try:
                 loop_start = time.time()
+                now = time.time()
 
                 # 1. Check for daily summary
                 self._maybe_send_daily_summary()
 
-                # 2. Fetch mark prices (throttled)
-                if time.time() - last_price_fetch >= price_fetch_interval:
-                    try:
-                        mark_prices = fetch_all_mark_prices_async(ALL_DEXES)
-                        last_price_fetch = time.time()
+                # 2. Fetch mark prices (tiered by exchange type)
+                try:
+                    # Main exchange: fetch every MARK_PRICE_FETCH_MAIN_SEC
+                    if now - last_price_fetch_main >= MARK_PRICE_FETCH_MAIN_SEC:
+                        main_prices = fetch_all_mark_prices_async(main_dex)
+                        mark_prices.update(main_prices)
+                        last_price_fetch_main = now
+                        logger.debug(f"Fetched {len(main_prices)} main exchange prices")
 
-                        # 3. Update cache with new prices
+                    # Sub-exchanges: fetch every MARK_PRICE_FETCH_SUB_SEC
+                    if now - last_price_fetch_sub >= MARK_PRICE_FETCH_SUB_SEC:
+                        sub_prices = fetch_all_mark_prices_async(sub_dexes)
+                        mark_prices.update(sub_prices)
+                        last_price_fetch_sub = now
+                        logger.debug(f"Fetched {len(sub_prices)} sub-exchange prices")
+
+                    # 3. Update cache with current prices
+                    if mark_prices:
                         self.position_cache.update_prices(mark_prices)
-                    except Exception as e:
-                        logger.warning(f"Price fetch failed: {e}")
-                        mark_prices = {}
+
+                except Exception as e:
+                    logger.warning(f"Price fetch failed: {e}")
 
                 # 4. Process tiered refresh queue
-                self._process_refresh_queue(mark_prices if 'mark_prices' in dir() else {})
+                self._process_refresh_queue(mark_prices)
 
                 # 5. Check proximity alerts
                 self._check_proximity_alerts()

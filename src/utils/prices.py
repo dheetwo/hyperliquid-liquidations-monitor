@@ -63,13 +63,13 @@ def fetch_all_mark_prices(dexes: List[str] = None) -> Dict[str, float]:
                 all_prices[token] = price_float
 
             dex_name = dex if dex else "main"
-            logger.info(f"Fetched {len(data)} mark prices from {dex_name} exchange")
+            logger.debug(f"Fetched {len(data)} mark prices from {dex_name} exchange")
 
         except Exception as e:
             dex_name = dex if dex else "main"
             logger.error(f"Failed to fetch mark prices from {dex_name}: {e}")
 
-    logger.info(f"Total mark prices fetched: {len(all_prices)}")
+    logger.debug(f"Total mark prices fetched: {len(all_prices)}")
     return all_prices
 
 
@@ -107,7 +107,7 @@ async def _async_fetch_dex_prices(
                     prices[token] = price_float
 
                 dex_name = dex if dex else "main"
-                logger.info(f"Fetched {len(data)} mark prices from {dex_name} exchange")
+                logger.debug(f"Fetched {len(data)} mark prices from {dex_name} exchange")
                 return prices
 
         except Exception as e:
@@ -140,7 +140,7 @@ async def _async_fetch_all_mark_prices(dexes: List[str] = None) -> Dict[str, flo
         if isinstance(result, dict):
             all_prices.update(result)
 
-    logger.info(f"Total mark prices fetched: {len(all_prices)}")
+    logger.debug(f"Total mark prices fetched: {len(all_prices)}")
     return all_prices
 
 

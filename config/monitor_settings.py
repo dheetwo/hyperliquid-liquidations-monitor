@@ -267,6 +267,21 @@ INFREQUENT_SCAN_INTERVAL_HOURS = 24  # Scan inactive wallets daily
 # Minimum notional thresholds are now defined via token classification above.
 # Use get_watchlist_threshold() function to get the threshold for a given token.
 
+# =============================================================================
+# MARK PRICE FETCH SETTINGS
+# =============================================================================
+# Controls how frequently mark prices are fetched during the monitor phase.
+# Fetching from all exchanges every second is wasteful - sub-exchanges have
+# lower liquidity and prices change less frequently.
+
+# Main exchange price fetch interval (seconds)
+# Main exchange (Hyperliquid perps) has highest volume and fastest price changes
+MARK_PRICE_FETCH_MAIN_SEC = 5.0
+
+# Sub-exchange price fetch interval (seconds)
+# xyz, flx, hyna, km have lower volume - prices change more slowly
+MARK_PRICE_FETCH_SUB_SEC = 30.0
+
 # Maximum age (minutes) for cached position data to be used as fallback
 # If rate limited, will use cached data if it's newer than this
 POSITION_CACHE_MAX_AGE_MINUTES = 30
