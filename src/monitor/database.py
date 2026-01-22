@@ -277,6 +277,58 @@ class MonitorDatabase:
                 )
             """)
 
+            # Wallet registry: unified wallet database with scan metadata
+            # This is the "Column A" non-decreasing wallet database
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS wallet_registry (
+                    address TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,           -- 'hyperdash' or 'liq_history'
+                    cohort TEXT,                    -- cohort name if from hyperdash
+                    position_value REAL,            -- NULL until first scan, then actual value
+                    total_collateral REAL,          -- NULL until first scan
+                    position_count INTEGER,         -- number of open positions
+                    scan_frequency TEXT NOT NULL DEFAULT 'normal',  -- 'normal' or 'infrequent'
+                    first_seen TEXT NOT NULL,
+                    last_scanned TEXT,              -- NULL if never scanned
+                    scan_count INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wallet_registry_frequency
+                ON wallet_registry(scan_frequency)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wallet_registry_source
+                ON wallet_registry(source)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wallet_registry_last_scanned
+                ON wallet_registry(last_scanned)
+            """)
+
+            # Scan snapshots: log of comprehensive (Column A) scans
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS scan_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_time TEXT NOT NULL,
+                    scan_type TEXT NOT NULL,        -- 'comprehensive', 'discovery', 'infrequent'
+                    total_wallets_scanned INTEGER NOT NULL,
+                    wallets_from_hyperdash INTEGER,
+                    wallets_from_liq_history INTEGER,
+                    wallets_normal_frequency INTEGER,
+                    wallets_infrequent INTEGER,
+                    positions_found INTEGER,
+                    positions_with_liq_price INTEGER,
+                    total_position_value REAL,
+                    scan_duration_seconds REAL,
+                    notes TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scan_snapshots_time
+                ON scan_snapshots(scan_time)
+            """)
+
     # =========================================================================
     # Watchlist Operations
     # =========================================================================
@@ -811,6 +863,347 @@ class MonitorDatabase:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM known_addresses")
         logger.debug("Known addresses cleared")
+
+    # =========================================================================
+    # Wallet Registry Operations (Column A - Non-Decreasing)
+    # =========================================================================
+
+    def register_wallet(
+        self,
+        address: str,
+        source: str,
+        cohort: Optional[str] = None,
+        position_value: Optional[float] = None,
+        total_collateral: Optional[float] = None,
+        position_count: Optional[int] = None,
+    ):
+        """
+        Register a wallet in the registry. Only adds new wallets (non-decreasing).
+
+        Args:
+            address: Wallet address
+            source: 'hyperdash' or 'liq_history'
+            cohort: Cohort name (if from hyperdash)
+            position_value: Total position value (if known)
+            total_collateral: Total collateral (if known)
+            position_count: Number of open positions (if known)
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            # Check if already exists
+            cursor = conn.execute(
+                "SELECT address FROM wallet_registry WHERE address = ?",
+                (address,)
+            )
+            if cursor.fetchone():
+                # Already registered - don't overwrite (non-decreasing)
+                return
+
+            # Insert new wallet
+            conn.execute("""
+                INSERT INTO wallet_registry (
+                    address, source, cohort, position_value, total_collateral,
+                    position_count, scan_frequency, first_seen, last_scanned, scan_count
+                ) VALUES (?, ?, ?, ?, ?, ?, 'normal', ?, NULL, 0)
+            """, (
+                address, source, cohort, position_value, total_collateral,
+                position_count, now
+            ))
+
+    def register_wallets_batch(self, wallets: List[dict]):
+        """
+        Register multiple wallets efficiently. Only adds new wallets.
+
+        Args:
+            wallets: List of dicts with address, source, cohort, etc.
+        """
+        if not wallets:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        added = 0
+
+        with self._get_connection() as conn:
+            for w in wallets:
+                # Check if exists
+                cursor = conn.execute(
+                    "SELECT address FROM wallet_registry WHERE address = ?",
+                    (w['address'],)
+                )
+                if cursor.fetchone():
+                    continue
+
+                conn.execute("""
+                    INSERT INTO wallet_registry (
+                        address, source, cohort, position_value, total_collateral,
+                        position_count, scan_frequency, first_seen, last_scanned, scan_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'normal', ?, NULL, 0)
+                """, (
+                    w['address'],
+                    w.get('source', 'unknown'),
+                    w.get('cohort'),
+                    w.get('position_value'),
+                    w.get('total_collateral'),
+                    w.get('position_count'),
+                    now
+                ))
+                added += 1
+
+        if added > 0:
+            logger.info(f"Registered {added} new wallets in registry")
+
+    def update_wallet_scan_result(
+        self,
+        address: str,
+        position_value: float,
+        total_collateral: float,
+        position_count: int,
+        min_position_value_threshold: float,
+    ):
+        """
+        Update wallet with scan results and recalculate scan frequency.
+
+        Args:
+            address: Wallet address
+            position_value: Total position value from scan
+            total_collateral: Total collateral from scan
+            position_count: Number of open positions
+            min_position_value_threshold: Threshold for 'normal' vs 'infrequent'
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Determine scan frequency based on position value
+        scan_frequency = 'normal' if position_value >= min_position_value_threshold else 'infrequent'
+
+        with self._get_connection() as conn:
+            conn.execute("""
+                UPDATE wallet_registry
+                SET position_value = ?,
+                    total_collateral = ?,
+                    position_count = ?,
+                    scan_frequency = ?,
+                    last_scanned = ?,
+                    scan_count = scan_count + 1
+                WHERE address = ?
+            """, (position_value, total_collateral, position_count, scan_frequency, now, address))
+
+    def update_wallet_scan_results_batch(
+        self,
+        results: List[dict],
+        min_position_value_threshold: float,
+    ):
+        """
+        Update multiple wallets with scan results.
+
+        Args:
+            results: List of dicts with address, position_value, total_collateral, position_count
+            min_position_value_threshold: Threshold for 'normal' vs 'infrequent'
+        """
+        if not results:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            for r in results:
+                scan_frequency = 'normal' if r['position_value'] >= min_position_value_threshold else 'infrequent'
+                conn.execute("""
+                    UPDATE wallet_registry
+                    SET position_value = ?,
+                        total_collateral = ?,
+                        position_count = ?,
+                        scan_frequency = ?,
+                        last_scanned = ?,
+                        scan_count = scan_count + 1
+                    WHERE address = ?
+                """, (
+                    r['position_value'],
+                    r['total_collateral'],
+                    r['position_count'],
+                    scan_frequency,
+                    now,
+                    r['address']
+                ))
+
+        logger.debug(f"Updated {len(results)} wallet scan results")
+
+    def get_wallets_to_scan(
+        self,
+        infrequent_scan_interval_hours: int = 24
+    ) -> List[dict]:
+        """
+        Get wallets that should be scanned this cycle.
+
+        Returns wallets where:
+        - Never scanned (last_scanned IS NULL)
+        - Normal frequency (always scan)
+        - Infrequent frequency AND last_scanned > interval hours ago
+
+        Args:
+            infrequent_scan_interval_hours: Hours between infrequent scans
+
+        Returns:
+            List of wallet dicts
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=infrequent_scan_interval_hours)).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM wallet_registry
+                WHERE last_scanned IS NULL
+                   OR scan_frequency = 'normal'
+                   OR (scan_frequency = 'infrequent' AND last_scanned < ?)
+                ORDER BY
+                    CASE WHEN last_scanned IS NULL THEN 0 ELSE 1 END,
+                    scan_frequency DESC,
+                    last_scanned ASC
+            """, (cutoff,))
+
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_wallet_registry_stats(self) -> dict:
+        """Get statistics about the wallet registry."""
+        with self._get_connection() as conn:
+            stats = {}
+
+            # Total wallets
+            cursor = conn.execute("SELECT COUNT(*) as count FROM wallet_registry")
+            stats['total'] = cursor.fetchone()['count']
+
+            # By source
+            cursor = conn.execute("""
+                SELECT source, COUNT(*) as count
+                FROM wallet_registry GROUP BY source
+            """)
+            stats['by_source'] = {row['source']: row['count'] for row in cursor.fetchall()}
+
+            # By frequency
+            cursor = conn.execute("""
+                SELECT scan_frequency, COUNT(*) as count
+                FROM wallet_registry GROUP BY scan_frequency
+            """)
+            stats['by_frequency'] = {row['scan_frequency']: row['count'] for row in cursor.fetchall()}
+
+            # Never scanned
+            cursor = conn.execute(
+                "SELECT COUNT(*) as count FROM wallet_registry WHERE last_scanned IS NULL"
+            )
+            stats['never_scanned'] = cursor.fetchone()['count']
+
+            # Scanned at least once
+            cursor = conn.execute(
+                "SELECT COUNT(*) as count FROM wallet_registry WHERE last_scanned IS NOT NULL"
+            )
+            stats['scanned'] = cursor.fetchone()['count']
+
+        return stats
+
+    def get_all_wallet_addresses(self) -> Set[str]:
+        """Get all wallet addresses from registry."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT address FROM wallet_registry")
+            return {row['address'] for row in cursor.fetchall()}
+
+    # =========================================================================
+    # Scan Snapshot Operations (Comprehensive Scan Logging)
+    # =========================================================================
+
+    def log_scan_snapshot(
+        self,
+        scan_type: str,
+        total_wallets_scanned: int,
+        wallets_from_hyperdash: int = 0,
+        wallets_from_liq_history: int = 0,
+        wallets_normal_frequency: int = 0,
+        wallets_infrequent: int = 0,
+        positions_found: int = 0,
+        positions_with_liq_price: int = 0,
+        total_position_value: float = 0.0,
+        scan_duration_seconds: float = 0.0,
+        notes: Optional[str] = None,
+    ) -> int:
+        """
+        Log a comprehensive scan snapshot.
+
+        Args:
+            scan_type: 'comprehensive', 'discovery', or 'infrequent'
+            total_wallets_scanned: Number of wallets scanned
+            wallets_from_hyperdash: Wallets from hyperdash source
+            wallets_from_liq_history: Wallets from liquidation history
+            wallets_normal_frequency: Wallets with normal scan frequency
+            wallets_infrequent: Wallets with infrequent scan frequency
+            positions_found: Total positions found
+            positions_with_liq_price: Positions with liquidation price
+            total_position_value: Sum of all position values
+            scan_duration_seconds: How long the scan took
+            notes: Optional notes
+
+        Returns:
+            Snapshot ID
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO scan_snapshots (
+                    scan_time, scan_type, total_wallets_scanned,
+                    wallets_from_hyperdash, wallets_from_liq_history,
+                    wallets_normal_frequency, wallets_infrequent,
+                    positions_found, positions_with_liq_price,
+                    total_position_value, scan_duration_seconds, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                now, scan_type, total_wallets_scanned,
+                wallets_from_hyperdash, wallets_from_liq_history,
+                wallets_normal_frequency, wallets_infrequent,
+                positions_found, positions_with_liq_price,
+                total_position_value, scan_duration_seconds, notes
+            ))
+            snapshot_id = cursor.lastrowid
+
+        logger.info(
+            f"Scan snapshot logged: {scan_type} | "
+            f"{total_wallets_scanned} wallets | "
+            f"{positions_found} positions | "
+            f"${total_position_value:,.0f} total value | "
+            f"{scan_duration_seconds:.1f}s"
+        )
+
+        return snapshot_id
+
+    def get_recent_scan_snapshots(self, limit: int = 10) -> List[dict]:
+        """Get recent scan snapshots."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM scan_snapshots
+                ORDER BY scan_time DESC
+                LIMIT ?
+            """, (limit,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_scan_snapshot_summary(self, hours: int = 24) -> dict:
+        """Get summary of scans in the last N hours."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT
+                    COUNT(*) as total_scans,
+                    SUM(total_wallets_scanned) as total_wallets,
+                    SUM(positions_found) as total_positions,
+                    SUM(scan_duration_seconds) as total_duration
+                FROM scan_snapshots
+                WHERE scan_time > ?
+            """, (cutoff,))
+            row = cursor.fetchone()
+
+            return {
+                'total_scans': row['total_scans'] or 0,
+                'total_wallets_scanned': row['total_wallets'] or 0,
+                'total_positions_found': row['total_positions'] or 0,
+                'total_duration_seconds': row['total_duration'] or 0,
+            }
 
     # =========================================================================
     # Cohort Cache Operations
