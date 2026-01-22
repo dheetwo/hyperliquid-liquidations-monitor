@@ -229,9 +229,47 @@ Results are sorted by distance to liquidation (closest first).
 - **Over-reliance on Cohorts:** Some $5M+ accounts may not appear in any cohort - use alternative discovery methods
 
 ### Data Protection
-- **Wallet addresses are valuable:** Never clear `known_addresses`, `cohort_cache`, or `liquidation_history.db` without explicit request
+- **Wallet addresses are valuable:** Never clear `known_addresses`, `cohort_cache`, `wallet_registry`, or `liquidation_history.db` without explicit request
 - **Use `--clear-cache`** instead of `--clear-db` for normal cache rebuilds
 - **Liquidation history** is stored separately in `data/liquidation_history.db` and accumulates over time
+- **Wallet registry** is non-decreasing - wallets are only added, never removed (Column A database)
+
+## Wallet Registry (Column A - Non-Decreasing)
+
+The wallet registry (`wallet_registry` table) is the unified source of all known wallet addresses:
+
+### Sources
+- **Hyperdash cohorts**: Wallets from size/PnL cohorts with full metadata
+- **Liquidation history**: Wallets from Telegram feed with liquidation event data
+
+### Scan Frequency Classification
+Wallets are classified based on their position value from the most recent scan:
+- **Normal frequency**: `position_value >= WALLET_ACTIVE_THRESHOLD` ($60K) → scanned every discovery cycle
+- **Infrequent**: `position_value < WALLET_ACTIVE_THRESHOLD` → scanned every `INFREQUENT_SCAN_INTERVAL_HOURS` (24h)
+- **Never scanned**: `last_scanned IS NULL` → always scanned next cycle
+
+### Schema
+```sql
+wallet_registry (
+    address TEXT PRIMARY KEY,
+    source TEXT,              -- 'hyperdash' or 'liq_history'
+    cohort TEXT,              -- cohort name if from hyperdash
+    position_value REAL,      -- NULL until first scan
+    total_collateral REAL,
+    position_count INTEGER,
+    scan_frequency TEXT,      -- 'normal' or 'infrequent'
+    first_seen TEXT,
+    last_scanned TEXT,
+    scan_count INTEGER
+)
+```
+
+### Scan Snapshots
+Comprehensive scans are logged to `scan_snapshots` table for auditing:
+- `scan_type`: 'comprehensive', 'discovery', 'infrequent'
+- `total_wallets_scanned`, `positions_found`, `total_position_value`
+- `scan_duration_seconds`
+- Enables tracking of scan efficiency over time
 
 ## Monitor Service (`src/monitor/`)
 

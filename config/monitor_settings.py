@@ -249,6 +249,21 @@ MAX_WATCH_DISTANCE_PCT = 5.0
 # Note: Lower value = more wallets to scan = longer discovery cycles
 MIN_WALLET_POSITION_VALUE = 60_000  # $60K
 
+# =============================================================================
+# WALLET REGISTRY SETTINGS (Column A - Non-Decreasing Database)
+# =============================================================================
+# Settings for the unified wallet registry that tracks all known addresses
+# from both Hyperdash and liquidation history sources.
+
+# Threshold for classifying wallets as 'normal' vs 'infrequent' scan frequency
+# Wallets with position_value >= this are scanned every discovery cycle
+# Wallets with position_value < this are scanned at INFREQUENT_SCAN_INTERVAL_HOURS
+WALLET_ACTIVE_THRESHOLD = MIN_WALLET_POSITION_VALUE  # Use same as minimum position value
+
+# How often to scan "infrequent" wallets (those below threshold)
+# These wallets had no/low positions on previous scans
+INFREQUENT_SCAN_INTERVAL_HOURS = 24  # Scan inactive wallets daily
+
 # Minimum notional thresholds are now defined via token classification above.
 # Use get_watchlist_threshold() function to get the threshold for a given token.
 

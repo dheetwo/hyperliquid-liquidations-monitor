@@ -74,6 +74,8 @@ from config.monitor_settings import (
     COHORT_DATA_PATH,
     MAX_WATCH_DISTANCE_PCT,
     MIN_WALLET_POSITION_VALUE,
+    WALLET_ACTIVE_THRESHOLD,
+    INFREQUENT_SCAN_INTERVAL_HOURS,
     get_watchlist_threshold,
 )
 
@@ -531,10 +533,40 @@ class MonitorService:
         # Batch save to cache
         self.position_cache.update_positions_batch(cached_positions)
 
-        # Step 5: Save known addresses
-        logger.info("Step 5: Recording known addresses...")
+        # Step 5: Save known addresses and register in wallet registry
+        logger.info("Step 5: Recording known addresses and wallet registry...")
         self.discovery_scheduler.known_addresses = {addr for addr, _ in unique_addresses}
         self.db.save_known_addresses_batch(unique_addresses)
+
+        # Register all wallets in the unified wallet registry (Column A - non-decreasing)
+        wallet_registrations = [
+            {'address': addr, 'source': 'hyperdash', 'cohort': cohort}
+            for addr, cohort in unique_addresses
+        ]
+        self.db.register_wallets_batch(wallet_registrations)
+
+        # Calculate per-wallet position values for scan frequency classification
+        wallet_position_values: Dict[str, float] = {}
+        wallet_position_counts: Dict[str, int] = {}
+        for pos in cached_positions:
+            addr = pos.address
+            if addr not in wallet_position_values:
+                wallet_position_values[addr] = 0.0
+                wallet_position_counts[addr] = 0
+            wallet_position_values[addr] += pos.position_value
+            wallet_position_counts[addr] += 1
+
+        # Update wallet registry with scan results (for frequency classification)
+        wallet_results = [
+            {
+                'address': addr,
+                'position_value': wallet_position_values.get(addr, 0.0),
+                'total_collateral': 0.0,  # Not tracked separately yet
+                'position_count': wallet_position_counts.get(addr, 0),
+            }
+            for addr, _ in unique_addresses
+        ]
+        self.db.update_wallet_scan_results_batch(wallet_results, WALLET_ACTIVE_THRESHOLD)
 
         # Record scan time
         self.db.set_last_scan_time(scan_start)
@@ -555,12 +587,37 @@ class MonitorService:
         scan_duration = (datetime.now(timezone.utc) - scan_start).total_seconds()
         tier_counts = self.position_cache.get_tier_counts()
 
+        # Get wallet registry stats for snapshot
+        wallet_stats = self.db.get_wallet_registry_stats()
+
+        # Calculate total position value
+        total_position_value = sum(p.position_value for p in cached_positions)
+
+        # Log comprehensive scan snapshot (Column A scan complete)
+        self.db.log_scan_snapshot(
+            scan_type='comprehensive',
+            total_wallets_scanned=len(unique_addresses),
+            wallets_from_hyperdash=len(unique_addresses),  # All from hyperdash in initial scan
+            wallets_from_liq_history=0,
+            wallets_normal_frequency=wallet_stats.get('by_frequency', {}).get('normal', 0),
+            wallets_infrequent=wallet_stats.get('by_frequency', {}).get('infrequent', 0),
+            positions_found=len(cached_positions),
+            positions_with_liq_price=len(cached_positions),  # All have liq price (filtered)
+            total_position_value=total_position_value,
+            scan_duration_seconds=scan_duration,
+            notes=f"Initial scan: {stats['total_positions']} total positions, "
+                  f"{stats['passed_filters']} passed filters"
+        )
+
         logger.info("=" * 60)
         logger.info(f"INITIAL SCAN COMPLETE ({scan_duration:.1f}s)")
         logger.info(f"Cached positions: {len(self.position_cache.positions)}")
         logger.info(f"  Critical (≤{CACHE_TIER_CRITICAL_PCT}%): {tier_counts['critical']}")
         logger.info(f"  High ({CACHE_TIER_CRITICAL_PCT}-{CACHE_TIER_HIGH_PCT}%): {tier_counts['high']}")
         logger.info(f"  Normal (>{CACHE_TIER_HIGH_PCT}%): {tier_counts['normal']}")
+        logger.info(f"Wallet registry: {wallet_stats.get('total', 0)} total, "
+                   f"{wallet_stats.get('by_frequency', {}).get('normal', 0)} normal, "
+                   f"{wallet_stats.get('by_frequency', {}).get('infrequent', 0)} infrequent")
         logger.info("=" * 60)
 
         # Send startup notification
@@ -837,14 +894,27 @@ class MonitorService:
             self._alerted_positions[key] = alert_state
 
     def _run_discovery(self):
-        """Run discovery scan to find new addresses/positions."""
+        """
+        Run discovery scan to find new addresses and scan due wallets.
+
+        Uses wallet registry to determine which wallets to scan:
+        1. Never-scanned wallets (position_value = NULL)
+        2. Normal frequency wallets (always)
+        3. Infrequent wallets (if last_scanned > INFREQUENT_SCAN_INTERVAL_HOURS ago)
+
+        Also discovers new addresses from cohorts and liquidation history.
+        """
         logger.info("Running discovery scan...")
+        scan_start = datetime.now(timezone.utc)
 
         try:
-            # Fetch current cohorts
+            # Step 1: Get wallets due for scanning from registry
+            wallets_to_scan = self.db.get_wallets_to_scan(INFREQUENT_SCAN_INTERVAL_HOURS)
+            registry_addresses = {w['address'] for w in wallets_to_scan}
+
+            # Step 2: Fetch current cohorts to discover NEW addresses
             traders = fetch_cohorts(ALL_COHORTS, delay=1.0)
 
-            # Filter traders (same criteria as initial scan)
             def passes_filters(t):
                 if t.position_value < MIN_WALLET_POSITION_VALUE:
                     return False
@@ -853,33 +923,77 @@ class MonitorService:
                 return True
 
             traders = [t for t in traders if passes_filters(t)]
-            current_addresses = [(t.address, t.cohort) for t in traders]
 
-            # Find new addresses
-            new_addresses = self.discovery_scheduler.find_new_addresses(current_addresses)
+            # Find truly new addresses (not in registry at all)
+            new_from_cohorts = []
+            for t in traders:
+                if t.address not in registry_addresses:
+                    new_from_cohorts.append({'address': t.address, 'source': 'hyperdash', 'cohort': t.cohort})
 
-            if not new_addresses:
-                logger.info("Discovery complete: no new addresses found")
+            # Step 3: Check liquidation history for new addresses
+            new_from_liq_history = []
+            if self.liq_history_db:
+                liq_addresses = self.liq_history_db.get_addresses_for_discovery(
+                    min_notional=100_000,  # $100K minimum liquidation
+                    max_scan_age_hours=24
+                )
+                existing_registry = self.db.get_all_wallet_addresses()
+                for addr, max_notional in liq_addresses:
+                    if addr not in existing_registry:
+                        new_from_liq_history.append({
+                            'address': addr,
+                            'source': 'liq_history',
+                            'cohort': 'liq_history'
+                        })
+
+            # Step 4: Register new wallets in registry
+            all_new_wallets = new_from_cohorts + new_from_liq_history
+            if all_new_wallets:
+                self.db.register_wallets_batch(all_new_wallets)
+                logger.info(f"Registered {len(new_from_cohorts)} from cohorts, "
+                           f"{len(new_from_liq_history)} from liq history")
+
+            # Step 5: Build final scan list (registry due + new wallets)
+            addresses_to_scan = []
+            for w in wallets_to_scan:
+                addresses_to_scan.append((w['address'], w.get('cohort', 'unknown')))
+            for w in all_new_wallets:
+                addresses_to_scan.append((w['address'], w.get('cohort', 'unknown')))
+
+            if not addresses_to_scan:
+                logger.info("Discovery complete: no wallets to scan")
                 self.discovery_scheduler.mark_discovery_complete([])
                 return
 
-            logger.info(f"Discovery: found {len(new_addresses)} new addresses")
+            logger.info(f"Discovery: scanning {len(addresses_to_scan)} wallets "
+                       f"({len(wallets_to_scan)} from registry, {len(all_new_wallets)} new)")
 
-            # Fetch positions for new addresses
+            # Step 6: Fetch positions
             mark_prices = fetch_all_mark_prices_async(ALL_DEXES)
-            positions = fetch_all_positions_async(new_addresses, mark_prices, dexes=ALL_DEXES)
+            positions = fetch_all_positions_async(addresses_to_scan, mark_prices, dexes=ALL_DEXES)
 
-            # Add to cache (with filtering: liq price, notional, distance)
+            # Step 7: Process positions and update cache
             known_exchanges = {"xyz", "flx", "vntl", "hyna", "km"}
             added_count = 0
             filtered_count = 0
+            wallet_position_values: Dict[str, float] = {}
+            wallet_position_counts: Dict[str, int] = {}
+
             for pos in positions:
                 token = pos.token
                 exchange = pos.exchange
                 price = get_current_price(token, exchange, mark_prices)
 
+                # Track per-wallet stats regardless of filter outcome
+                addr = pos.address
+                if addr not in wallet_position_values:
+                    wallet_position_values[addr] = 0.0
+                    wallet_position_counts[addr] = 0
+                wallet_position_values[addr] += pos.position_value
+                wallet_position_counts[addr] += 1
+
                 if price and price > 0:
-                    # Sanitize token: strip exchange prefix if present
+                    # Sanitize token
                     clean_token = token
                     if ":" in token:
                         prefix, rest = token.split(":", 1)
@@ -919,17 +1033,54 @@ class MonitorService:
                     self.position_cache.update_position(cached)
                     added_count += 1
 
+            # Step 8: Update wallet registry with scan results
+            wallet_results = [
+                {
+                    'address': addr,
+                    'position_value': wallet_position_values.get(addr, 0.0),
+                    'total_collateral': 0.0,
+                    'position_count': wallet_position_counts.get(addr, 0),
+                }
+                for addr, _ in addresses_to_scan
+            ]
+            self.db.update_wallet_scan_results_batch(wallet_results, WALLET_ACTIVE_THRESHOLD)
+
+            # Step 9: Log scan snapshot
+            scan_duration = (datetime.now(timezone.utc) - scan_start).total_seconds()
+            total_position_value = sum(wallet_position_values.values())
+
+            # Count wallets by source
+            wallets_from_hyperdash = sum(1 for w in wallets_to_scan if w.get('source') == 'hyperdash')
+            wallets_from_liq = sum(1 for w in wallets_to_scan if w.get('source') == 'liq_history')
+            wallets_normal = sum(1 for w in wallets_to_scan if w.get('scan_frequency') == 'normal')
+            wallets_infreq = sum(1 for w in wallets_to_scan if w.get('scan_frequency') == 'infrequent')
+
+            self.db.log_scan_snapshot(
+                scan_type='discovery',
+                total_wallets_scanned=len(addresses_to_scan),
+                wallets_from_hyperdash=wallets_from_hyperdash + len(new_from_cohorts),
+                wallets_from_liq_history=wallets_from_liq + len(new_from_liq_history),
+                wallets_normal_frequency=wallets_normal,
+                wallets_infrequent=wallets_infreq,
+                positions_found=added_count,
+                positions_with_liq_price=added_count,
+                total_position_value=total_position_value,
+                scan_duration_seconds=scan_duration,
+                notes=f"Discovery: {len(all_new_wallets)} new wallets, {filtered_count} positions filtered"
+            )
+
             # Mark discovery complete
-            self.discovery_scheduler.mark_discovery_complete(new_addresses)
+            self.discovery_scheduler.mark_discovery_complete(
+                [(addr, cohort) for addr, cohort in addresses_to_scan if addr in [w['address'] for w in all_new_wallets]]
+            )
 
             logger.info(
-                f"Discovery complete: added {added_count} positions from {len(new_addresses)} new addresses "
-                f"({filtered_count} filtered by notional threshold)"
+                f"Discovery complete ({scan_duration:.1f}s): added {added_count} positions from "
+                f"{len(addresses_to_scan)} wallets ({filtered_count} filtered)"
             )
 
         except Exception as e:
             logger.error(f"Discovery scan failed: {e}")
-            # Still mark discovery complete to avoid immediate retry
             self.discovery_scheduler.mark_discovery_complete([])
 
     def _maybe_send_daily_summary(self):
