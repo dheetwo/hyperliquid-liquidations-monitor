@@ -83,29 +83,34 @@ ISOLATED_MULTIPLIER = 5.0
 # MAIN EXCHANGE - Crypto Token Tiers
 # -----------------------------------------------------------------------------
 # Cross thresholds defined below; Isolated = Cross / ISOLATED_MULTIPLIER
+# Thresholds based on actual order book liquidity analysis (Jan 2025)
 
-MAIN_MEGA_CAP = {"BTC"}
-MAIN_LARGE_CAP = {"ETH"}
-MAIN_TIER1_ALTS = {"SOL", "BNB", "XRP"}
-MAIN_TIER2_ALTS = {
-    "DOGE", "ADA", "AVAX", "LINK", "LTC",
-    "DOT", "MATIC", "UNI", "ATOM", "TRX", "SHIB", "HYPE"
-}
+MAIN_MEGA_CAP = {"BTC", "ETH"}           # $30M cross - deepest liquidity (~$8-13M in ±1%)
+MAIN_LARGE_CAP = {"SOL"}                  # $20M cross - high liquidity (~$10M in ±1%)
+MAIN_TIER1_ALTS = {"DOGE", "XRP", "HYPE"} # $5M cross - moderate liquidity (~$2-3M in ±1%)
+MAIN_TIER2_ALTS = {"BNB"}                 # $1M cross - lower liquidity (~$300K in ±1%)
 MAIN_MID_ALTS = {
-    "APT", "ARB", "OP", "SUI", "TON", "NEAR", "SEI", "TIA", "INJ",
-    "PEPE", "WIF", "BONK", "FLOKI",
-    "AAVE", "MKR", "RENDER", "FET", "FIL"
+    # ~$300K-$800K liquidity in ±1%
+    "ADA", "AVAX", "LINK", "LTC", "DOT", "UNI", "ATOM", "TRX", "SHIB",
+    "SUI", "AAVE", "CRV", "NEAR", "OP", "kPEPE", "kSHIB", "kBONK",
 }
-# Everything else = SMALL_CAPS (default)
+MAIN_LOW_ALTS = {
+    # ~$100K-$300K liquidity in ±1%
+    "APT", "ARB", "TON", "SEI", "TIA", "INJ",
+    "PEPE", "WIF", "BONK", "FLOKI",
+    "MKR", "RENDER", "FET", "FIL", "ORDI", "XLM",
+}
+# Everything else = SMALL_CAPS (default) - <$100K liquidity
 
-# Cross thresholds for main exchange
+# Cross thresholds for main exchange (raised to reduce alert volume)
 MAIN_THRESHOLDS_CROSS = {
-    "MEGA_CAP": 100_000_000,      # $100M - BTC
-    "LARGE_CAP": 75_000_000,      # $75M - ETH
-    "TIER1_ALTS": 25_000_000,     # $25M - SOL, BNB, XRP
-    "TIER2_ALTS": 10_000_000,     # $10M - DOGE, ADA, AVAX, etc.
-    "MID_ALTS": 5_000_000,        # $5M - APT, ARB, memes, DeFi, etc.
-    "SMALL_CAPS": 1_500_000,      # $1.5M - everything else
+    "MEGA_CAP": 30_000_000,       # $30M - BTC, ETH (unchanged)
+    "LARGE_CAP": 20_000_000,      # $20M - SOL (unchanged)
+    "TIER1_ALTS": 10_000_000,     # $10M - DOGE, XRP, HYPE
+    "TIER2_ALTS": 2_000_000,      # $2M - BNB
+    "MID_ALTS": 1_000_000,        # $1M - mid liquidity alts
+    "LOW_ALTS": 500_000,          # $500K - low liquidity alts
+    "SMALL_CAPS": 300_000,        # $300K - everything else
 }
 
 # Legacy compatibility
@@ -115,11 +120,16 @@ MAJORS = ["ETH", "SOL", "BNB", "XRP"]
 # XYZ EXCHANGE - Equities, Commodities, Forex (All Isolated)
 # -----------------------------------------------------------------------------
 # xyz only supports isolated margin - no cross/isolated distinction needed
+# Thresholds based on actual order book liquidity analysis (Jan 2025)
 
 XYZ_INDICES = {"XYZ100"}
-XYZ_MEGA_EQUITIES = {"AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"}
-XYZ_LARGE_EQUITIES = {"AMD", "NFLX", "COIN", "MSTR", "ORCL", "TSM", "LLY", "COST"}
-# Default for unknown stocks: BABA, CRCL, HOOD, INTC, MU, PLTR, RIVN, SKHX, SNDK, etc.
+# High liquidity equities (~$500K-$2M in ±1% depth)
+XYZ_HIGH_LIQ_EQUITIES = {
+    "NFLX", "INTC", "GOOGL", "NVDA", "TSLA", "AMZN", "META",
+    "MSTR", "AAPL", "COIN", "MSFT", "AMD", "MU", "PLTR", "ORCL",
+}
+# Lower liquidity equities
+XYZ_LOW_LIQ_EQUITIES = {"BABA", "CRCL", "HOOD", "SNDK", "TSM", "LLY", "COST"}
 
 XYZ_GOLD = {"GOLD"}
 XYZ_OIL = {"CL"}
@@ -129,19 +139,19 @@ XYZ_ENERGY = {"NATGAS"}
 XYZ_URANIUM = {"URANIUM"}
 XYZ_FOREX = {"EUR", "JPY"}
 
-# Thresholds for xyz exchange (all isolated)
+# Thresholds for xyz exchange (all isolated, raised to reduce alert volume)
 XYZ_THRESHOLDS = {
-    "INDICES": 5_000_000,         # $5M - XYZ100
-    "MEGA_EQUITIES": 3_000_000,   # $3M - AAPL, MSFT, NVDA, etc.
-    "LARGE_EQUITIES": 2_000_000,  # $2M - AMD, NFLX, COIN, etc.
-    "EQUITIES": 1_000_000,        # $1M - default for other stocks
-    "GOLD": 2_500_000,            # $2.5M
-    "OIL": 2_000_000,             # $2M - CL (crude)
-    "SILVER": 1_500_000,          # $1.5M
-    "METALS": 1_000_000,          # $1M - COPPER
-    "ENERGY": 800_000,            # $800K - NATGAS
-    "URANIUM": 500_000,           # $500K - low liquidity expected
-    "FOREX": 1_000_000,           # $1M - EUR, JPY
+    "INDICES": 2_000_000,           # $2M - XYZ100 (unchanged)
+    "HIGH_LIQ_EQUITIES": 1_000_000, # $1M - NFLX, NVDA, TSLA, etc.
+    "LOW_LIQ_EQUITIES": 500_000,    # $500K - lower liquidity stocks
+    "EQUITIES": 500_000,            # $500K - default for other stocks
+    "GOLD": 1_000_000,              # $1M
+    "OIL": 600_000,                 # $600K - CL
+    "SILVER": 1_000_000,            # $1M
+    "METALS": 400_000,              # $400K - COPPER
+    "ENERGY": 300_000,              # $300K - NATGAS
+    "URANIUM": 200_000,             # $200K
+    "FOREX": 1_000_000,             # $1M - EUR, JPY
 }
 
 # -----------------------------------------------------------------------------
@@ -151,7 +161,7 @@ XYZ_THRESHOLDS = {
 # These sub-exchanges have lower liquidity; flat threshold for all tokens
 
 OTHER_SUB_EXCHANGES = {"flx", "hyna", "km"}  # vntl excluded: no external price discovery
-OTHER_SUB_EXCHANGE_THRESHOLD = 500_000  # $500K for all tokens
+OTHER_SUB_EXCHANGE_THRESHOLD = 400_000  # $400K for all tokens
 
 # =============================================================================
 # NEW POSITION ALERT THRESHOLDS
@@ -235,8 +245,9 @@ MAX_WATCH_DISTANCE_PCT = 5.0
 
 # Minimum wallet position value to fetch positions for
 # Wallets with total notional below this are skipped entirely (saves API calls)
-# Matches lowest position threshold ($300K isolated small caps)
-MIN_WALLET_POSITION_VALUE = 300_000  # $300K
+# Matches lowest position threshold ($60K isolated small caps)
+# Note: Lower value = more wallets to scan = longer discovery cycles
+MIN_WALLET_POSITION_VALUE = 60_000  # $60K
 
 # Minimum notional thresholds are now defined via token classification above.
 # Use get_watchlist_threshold() function to get the threshold for a given token.
@@ -366,10 +377,10 @@ def get_watchlist_threshold(token: str, exchange: str, is_isolated: bool) -> flo
     if exchange == "xyz":
         if token in XYZ_INDICES:
             return XYZ_THRESHOLDS["INDICES"]
-        elif token in XYZ_MEGA_EQUITIES:
-            return XYZ_THRESHOLDS["MEGA_EQUITIES"]
-        elif token in XYZ_LARGE_EQUITIES:
-            return XYZ_THRESHOLDS["LARGE_EQUITIES"]
+        elif token in XYZ_HIGH_LIQ_EQUITIES:
+            return XYZ_THRESHOLDS["HIGH_LIQ_EQUITIES"]
+        elif token in XYZ_LOW_LIQ_EQUITIES:
+            return XYZ_THRESHOLDS["LOW_LIQ_EQUITIES"]
         elif token in XYZ_GOLD:
             return XYZ_THRESHOLDS["GOLD"]
         elif token in XYZ_OIL:
@@ -404,6 +415,8 @@ def get_watchlist_threshold(token: str, exchange: str, is_isolated: bool) -> flo
         cross_threshold = MAIN_THRESHOLDS_CROSS["TIER2_ALTS"]
     elif token in MAIN_MID_ALTS:
         cross_threshold = MAIN_THRESHOLDS_CROSS["MID_ALTS"]
+    elif token in MAIN_LOW_ALTS:
+        cross_threshold = MAIN_THRESHOLDS_CROSS["LOW_ALTS"]
     else:
         cross_threshold = MAIN_THRESHOLDS_CROSS["SMALL_CAPS"]
 

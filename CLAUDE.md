@@ -285,36 +285,42 @@ CRITICAL_ALERT_PCT = 0.125            # Imminent liquidation
 
 # Watchlist filtering
 MAX_WATCH_DISTANCE_PCT = 5.0  # Max distance to include
-MIN_WALLET_POSITION_VALUE = 300_000  # Skip wallets below $300K total value
+MIN_WALLET_POSITION_VALUE = 60_000  # Skip wallets below $60K total value
 ```
 
 ### Watchlist Notional Thresholds
 
 Positions must meet minimum size requirements to be monitored. Isolated positions use 5x lower thresholds.
+Thresholds based on order book liquidity analysis (Jan 2025), raised to reduce alert volume.
 
 **Main Exchange (Cross / Isolated):**
 
 | Tier | Tokens | Cross Threshold | Isolated Threshold |
 |------|--------|-----------------|-------------------|
-| Mega Cap | BTC | $100M | $20M |
-| Large Cap | ETH | $75M | $15M |
-| Tier 1 Alts | SOL, BNB, XRP | $25M | $5M |
-| Tier 2 Alts | DOGE, ADA, AVAX, LINK, HYPE, etc. | $10M | $2M |
-| Mid Alts | APT, ARB, OP, memes, DeFi | $5M | $1M |
-| Small Caps | Everything else | $1.5M | $300K |
+| Mega Cap | BTC, ETH | $30M | $6M |
+| Large Cap | SOL | $20M | $4M |
+| Tier 1 Alts | DOGE, XRP, HYPE | $10M | $2M |
+| Tier 2 Alts | BNB | $2M | $400K |
+| Mid Alts | ADA, AVAX, LINK, SUI, AAVE, etc. | $1M | $200K |
+| Low Alts | APT, ARB, memes, DeFi | $500K | $100K |
+| Small Caps | Everything else | $300K | $60K |
 
 **XYZ Exchange (All Isolated):**
 
 | Category | Tokens | Threshold |
 |----------|--------|-----------|
-| Indices | XYZ100 | $5M |
-| Mega Equities | AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA | $3M |
-| Large Equities | AMD, NFLX, COIN, MSTR | $2M |
-| Other Equities | Default | $1M |
-| Gold | GOLD | $2.5M |
-| Oil | CL | $2M |
+| Indices | XYZ100 | $2M |
+| High Liq Equities | NFLX, NVDA, TSLA, GOOGL, AMZN, META, AAPL, MSFT, COIN, MSTR, etc. | $1M |
+| Low Liq Equities | BABA, CRCL, HOOD, etc. | $500K |
+| Gold | GOLD | $1M |
+| Silver | SILVER | $1M |
+| Oil | CL | $600K |
+| Forex | EUR, JPY | $1M |
+| Metals | COPPER | $400K |
+| Energy | NATGAS | $300K |
+| Uranium | URANIUM | $200K |
 
-**Other Sub-Exchanges (flx, hyna, km):** $500K flat threshold
+**Other Sub-Exchanges (flx, hyna, km):** $400K flat threshold
 
 ### Monitor Alert Types
 
