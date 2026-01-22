@@ -656,22 +656,34 @@ class MonitorService:
                 self._maybe_send_daily_summary()
 
                 # 2. Fetch mark prices (tiered by exchange type)
-                # Critical positions = top priority: fetch main exchange every loop (~0.2s)
-                has_critical = self.refresh_scheduler.has_critical_positions()
+                # Critical positions = top priority: fetch only their exchanges every loop
+                critical_exchanges = self.refresh_scheduler.get_critical_exchanges()
 
                 try:
-                    # Main exchange: every loop when critical, otherwise throttled
-                    if has_critical or (now - last_price_fetch_main >= MARK_PRICE_FETCH_MAIN_SEC):
+                    # Critical: fetch ONLY from exchanges with critical positions, every loop
+                    if critical_exchanges:
+                        # Map exchange names to dex params
+                        critical_dexes = []
+                        for ex in critical_exchanges:
+                            critical_dexes.append("" if ex == "main" else ex)
+                        critical_prices = fetch_all_mark_prices_async(critical_dexes)
+                        mark_prices.update(critical_prices)
+
+                    # Normal throttled fetches for background monitoring
+                    # Main exchange: every MARK_PRICE_FETCH_MAIN_SEC (skip if already fetched for critical)
+                    if "main" not in critical_exchanges and (now - last_price_fetch_main >= MARK_PRICE_FETCH_MAIN_SEC):
                         main_prices = fetch_all_mark_prices_async(main_dex)
                         mark_prices.update(main_prices)
                         last_price_fetch_main = now
 
-                    # Sub-exchanges: fetch every MARK_PRICE_FETCH_SUB_SEC
+                    # Sub-exchanges: every MARK_PRICE_FETCH_SUB_SEC (skip those already fetched for critical)
                     if now - last_price_fetch_sub >= MARK_PRICE_FETCH_SUB_SEC:
-                        sub_prices = fetch_all_mark_prices_async(sub_dexes)
-                        mark_prices.update(sub_prices)
+                        # Only fetch sub-exchanges not already fetched for critical
+                        non_critical_subs = [d for d in sub_dexes if d not in critical_exchanges]
+                        if non_critical_subs:
+                            sub_prices = fetch_all_mark_prices_async(non_critical_subs)
+                            mark_prices.update(sub_prices)
                         last_price_fetch_sub = now
-                        logger.debug(f"Fetched {len(sub_prices)} sub-exchange prices")
 
                     # 3. Update cache with current prices
                     if mark_prices:

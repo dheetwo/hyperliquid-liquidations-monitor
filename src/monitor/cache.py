@@ -529,6 +529,22 @@ class TieredRefreshScheduler:
         """Check if there are any positions in the critical tier."""
         return len(self.cache.tier_queues.get('critical', [])) > 0
 
+    def get_critical_exchanges(self) -> set:
+        """
+        Get the set of exchanges that have critical positions.
+
+        Returns:
+            Set of exchange names (e.g., {"main", "xyz"})
+        """
+        exchanges = set()
+        for position_key in self.cache.tier_queues.get('critical', []):
+            pos = self.cache.positions.get(position_key)
+            if pos:
+                # Normalize: empty string means "main"
+                exchange = pos.exchange if pos.exchange else "main"
+                exchanges.add(exchange)
+        return exchanges
+
 
 class DiscoveryScheduler:
     """
