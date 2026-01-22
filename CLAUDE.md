@@ -47,7 +47,8 @@ hyperdash_scanner/
 │   │   ├── monitor_phase.py     # Monitor phase logic
 │   │   ├── watchlist.py         # Watchlist management
 │   │   ├── alerts.py            # Telegram alerts, daily summaries
-│   │   └── database.py          # SQLite persistence
+│   │   ├── database.py          # SQLite persistence
+│   │   └── liquidation_feed.py  # Telegram liquidation feed parser
 │   ├── api/                     # External API clients
 │   │   ├── __init__.py          # Package exports
 │   │   ├── hyperliquid.py       # HyperliquidAPIClient, RateLimiter
@@ -197,12 +198,15 @@ Results are sorted by distance to liquidation (closest first).
 - [x] Removed order book fetching for faster scans (~7-12 min total)
 - [x] Wallet filtering (leverage, bias, minimum $300K value)
 - [x] Added profitable/unprofitable PnL cohorts
+- [x] Liquidation history tracking (recidivist monitoring from Telegram feeds)
+- [x] Fixed xyz token prefix bug in threshold lookups
 
 **TODO: Improvements**
 - [ ] Add cascade detection (chain of liquidations via order book)
 - [ ] Add market cap / OI percentage columns
 - [ ] WebSocket for real-time price updates (reduce API polling)
 - [ ] Historical tracking of positions across scans
+- [ ] Automated Telegram bot for liquidation feed ingestion
 
 ## Monitor Service (`src/monitor/`)
 
@@ -392,6 +396,53 @@ The monitor service uses cache-based continuous monitoring instead.
 | high-priority | kraken, large_whale, rekt | main, xyz | Fast scan of largest + rekt traders |
 | normal | all cohorts | main, xyz | Default balanced scan |
 | comprehensive | all cohorts | all 5 exchanges | Full coverage, slower |
+
+## Liquidation History (Recidivist Tracking)
+
+The monitor tracks addresses that have been liquidated in the past via Telegram liquidation feeds.
+This supplements Hyperdash cohort discovery for traders who may not be in any cohort but have
+significant position sizes.
+
+### Data Source
+
+- Telegram channel: `@liquidations_hyperliquid`
+- Message format: `🔴 #BTC Long Liquidation: $1.15M @ $88,827.1 [scan][dash]`
+- Links contain wallet addresses: `https://hypurrscan.io/address/0x...`
+
+### Database
+
+- Location: `data/liquidation_history.db`
+- Tables:
+  - `liquidation_history`: Raw liquidation events
+  - `liquidated_addresses`: Aggregated view with max notional per address
+
+### CLI Management
+
+```bash
+# View statistics
+python scripts/manage_liq_history.py stats
+
+# Import from Telegram channel export (JSON)
+python scripts/manage_liq_history.py import exported_channel.json
+
+# Add a liquidation manually
+python scripts/manage_liq_history.py add \
+  --address 0x3bcae23e8c380dab4732e9a159c0456f12d866f3 \
+  --token xyz:SILVER --notional 1950000 --price 96.07 \
+  --side Short --exchange xyz
+
+# Search for an address
+python scripts/manage_liq_history.py search 0x3bcae23e8c380dab4732e9a159c0456f12d866f3
+
+# List recidivists (addresses liquidated 2+ times)
+python scripts/manage_liq_history.py recidivists --min-liqs 2
+```
+
+### Integration with Monitor
+
+Addresses from liquidation history are automatically included in discovery scans if they
+have been liquidated with notional >= $100K. They are assigned the special cohort `liq_history`
+and scanned alongside regular cohort addresses.
 
 ## Common Commands
 

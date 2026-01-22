@@ -43,6 +43,7 @@ from src.pipeline.step3_filter import calculate_distance_to_liquidation
 from src.utils.prices import get_current_price
 from .alerts import TelegramAlerts, AlertConfig
 from .database import MonitorDatabase
+from .liquidation_feed import LiquidationHistoryDB
 from .cache import (
     CachedPosition,
     PositionCache,
@@ -147,8 +148,11 @@ class MonitorService:
             dry_run=dry_run,
         ))
 
-        # Initialize database
+        # Initialize databases
         self.db = MonitorDatabase()
+        self.liq_history_db = LiquidationHistoryDB(
+            Path(__file__).parent.parent.parent / "data" / "liquidation_history.db"
+        )
 
         # Initialize cache components
         self.position_cache = PositionCache(self.db)

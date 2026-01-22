@@ -5,7 +5,7 @@ Scan Phase
 Functions for executing the scan phase of the monitoring loop.
 
 The scan phase runs the full data pipeline:
-1. Fetch cohort data
+1. Fetch cohort data (+ liquidation history addresses)
 2. Fetch position data
 3. Run liquidation filter
 4. Detect new positions
@@ -16,7 +16,7 @@ The scan phase runs the full data pipeline:
 import csv
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import requests
 
@@ -183,6 +183,20 @@ def run_scan_phase(
 
         # Main scan: primary cohorts and dexes
         addresses = load_cohort_addresses(COHORT_DATA_PATH, cohorts=cohorts)
+
+        # Add liquidation history addresses (addresses that have been liquidated before)
+        liq_history_addresses = _get_liquidation_history_addresses(service)
+        if liq_history_addresses:
+            # Convert to (address, cohort) tuples with special cohort marker
+            existing_addrs = {addr for addr, _ in addresses}
+            new_liq_addrs = [
+                (addr, "liq_history")
+                for addr in liq_history_addresses
+                if addr not in existing_addrs
+            ]
+            addresses.extend(new_liq_addrs)
+            logger.info(f"Added {len(new_liq_addrs)} addresses from liquidation history")
+
         if addresses:
             logger.info(f"Main scan: {len(addresses)} addresses across {len(dexes)} exchanges (async)...")
             positions = fetch_all_positions_async(
@@ -338,3 +352,29 @@ def run_scan_phase(
         )
 
     return len(service.watchlist), len(new_positions)
+
+
+def _get_liquidation_history_addresses(service: 'MonitorService') -> List[str]:
+    """
+    Get addresses from liquidation history that should be included in scans.
+
+    These are addresses that have been liquidated in the past with significant
+    notional (recidivists). They get included regardless of Hyperdash cohort
+    membership.
+
+    Args:
+        service: MonitorService instance
+
+    Returns:
+        List of wallet addresses to include in scan
+    """
+    try:
+        # Get addresses with max liquidation >= $100K
+        # These are addresses that have been liquidated before and are worth monitoring
+        addresses = service.liq_history_db.get_addresses_above_threshold(100_000)
+        if addresses:
+            logger.debug(f"Retrieved {len(addresses)} addresses from liquidation history")
+        return addresses
+    except Exception as e:
+        logger.warning(f"Failed to load liquidation history addresses: {e}")
+        return []

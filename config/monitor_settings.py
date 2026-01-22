@@ -375,6 +375,10 @@ def get_watchlist_threshold(token: str, exchange: str, is_isolated: bool) -> flo
     """
     # xyz exchange - all isolated, use xyz-specific thresholds
     if exchange == "xyz":
+        # Strip "xyz:" prefix if present (API returns "xyz:SILVER" but config uses "SILVER")
+        if token.startswith("xyz:"):
+            token = token[4:]
+
         if token in XYZ_INDICES:
             return XYZ_THRESHOLDS["INDICES"]
         elif token in XYZ_HIGH_LIQ_EQUITIES:
