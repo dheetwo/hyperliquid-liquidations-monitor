@@ -720,8 +720,14 @@ class MonitorService:
 
     def _process_refresh_queue(self, mark_prices: Dict[str, float]):
         """Process tiered refresh queue, refreshing positions that need it."""
-        # Get positions needing refresh (up to 5 per cycle to stay within rate limits)
-        to_refresh = self.refresh_scheduler.get_positions_to_refresh(max_count=5)
+        # Get positions needing refresh
+        # Critical positions are always included (every loop), plus up to 5 from high/normal tiers
+        # Critical positions have no cap - liquidation price must stay in sync with mark price
+        critical_count = len(self.refresh_scheduler.cache.tier_queues.get('critical', []))
+        max_from_other_tiers = 5
+        to_refresh = self.refresh_scheduler.get_positions_to_refresh(
+            max_count=critical_count + max_from_other_tiers
+        )
 
         if not to_refresh:
             return

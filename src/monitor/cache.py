@@ -484,6 +484,9 @@ class TieredRefreshScheduler:
         """
         Get multiple positions needing refresh.
 
+        Critical positions are ALWAYS included (every loop) to keep liquidation
+        price in sync with mark price. High and normal tiers use interval checks.
+
         Args:
             max_count: Maximum number of positions to return
 
@@ -493,7 +496,13 @@ class TieredRefreshScheduler:
         now = time.time()
         to_refresh = []
 
-        for tier in ['critical', 'high', 'normal']:
+        # Critical tier: ALWAYS refresh every loop (in sync with mark prices)
+        # No interval check - liquidation price must stay current
+        for key in self.cache.tier_queues.get('critical', []):
+            to_refresh.append(key)
+
+        # High and normal tiers: use interval-based refresh
+        for tier in ['high', 'normal']:
             if len(to_refresh) >= max_count:
                 break
 
