@@ -184,9 +184,9 @@ Examples:
     )
 
     parser.add_argument(
-        '--skip-startup-summary',
+        '--startup-summary',
         action='store_true',
-        help='Skip the startup watchlist summary (useful for re-deployments)'
+        help='Send a watchlist summary on startup (by default, no summary is sent to avoid duplicates on redeployment)'
     )
 
     args = parser.parse_args()
@@ -267,7 +267,7 @@ Examples:
         service = MonitorService(
             poll_interval_seconds=args.poll,
             dry_run=args.dry_run,
-            skip_startup_summary=args.skip_startup_summary,
+            send_startup_summary=args.startup_summary,
         )
 
         print("\nStarting monitor service...")

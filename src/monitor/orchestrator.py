@@ -129,7 +129,7 @@ class MonitorService:
         self,
         poll_interval_seconds: int = POLL_INTERVAL_SECONDS,
         dry_run: bool = False,
-        skip_startup_summary: bool = False,
+        send_startup_summary: bool = False,
     ):
         """
         Initialize the monitor service.
@@ -137,11 +137,11 @@ class MonitorService:
         Args:
             poll_interval_seconds: Time between price polls
             dry_run: If True, print alerts instead of sending to Telegram
-            skip_startup_summary: If True, skip the startup watchlist summary
+            send_startup_summary: If True, send watchlist summary on startup (default: False to avoid duplicates on redeployment)
         """
         self.poll_interval = poll_interval_seconds
         self.dry_run = dry_run
-        self.skip_startup_summary = skip_startup_summary
+        self.send_startup_summary = send_startup_summary
 
         # Initialize alert system
         self.alerts = TelegramAlerts(AlertConfig(
@@ -1211,12 +1211,13 @@ class MonitorService:
                 )
 
             # Send startup watchlist summary (same format as daily summary)
-            if self.skip_startup_summary:
-                logger.info("Skipping startup watchlist summary (--skip-startup-summary)")
-            else:
-                logger.info("Sending startup watchlist summary...")
+            # Default: skip to avoid duplicate messages on redeployment
+            if self.send_startup_summary:
+                logger.info("Sending startup watchlist summary (--startup-summary)...")
                 now_est = datetime.now(EST)
                 self._send_daily_summary(now_est.hour, now_est.minute)
+            else:
+                logger.info("Skipping startup watchlist summary (use --startup-summary to enable)")
 
             # Enter main loop
             self._run_main_loop()
