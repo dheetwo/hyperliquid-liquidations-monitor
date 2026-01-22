@@ -11,10 +11,17 @@ Components:
 - watchlist.py: Watchlist building and management
 - alerts.py: Telegram alert system
 - database.py: SQLite persistence for state
+- liquidation_feed.py: Telegram liquidation feed parser and history
 """
 
 from .orchestrator import MonitorService
 from .alerts import TelegramAlerts, send_test_alert
+from .liquidation_feed import (
+    LiquidationParser,
+    LiquidationHistoryDB,
+    TelegramLiquidationListener,
+    ParsedLiquidation,
+)
 from src.models import WatchedPosition
 
 __all__ = [
@@ -22,4 +29,8 @@ __all__ = [
     "WatchedPosition",
     "TelegramAlerts",
     "send_test_alert",
+    "LiquidationParser",
+    "LiquidationHistoryDB",
+    "TelegramLiquidationListener",
+    "ParsedLiquidation",
 ]
