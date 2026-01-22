@@ -525,6 +525,10 @@ class TieredRefreshScheduler:
             if k in valid_keys
         }
 
+    def has_critical_positions(self) -> bool:
+        """Check if there are any positions in the critical tier."""
+        return len(self.cache.tier_queues.get('critical', [])) > 0
+
 
 class DiscoveryScheduler:
     """

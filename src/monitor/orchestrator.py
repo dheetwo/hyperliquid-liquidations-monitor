@@ -656,13 +656,18 @@ class MonitorService:
                 self._maybe_send_daily_summary()
 
                 # 2. Fetch mark prices (tiered by exchange type)
+                # When critical positions exist, fetch main exchange every loop (~0.2s)
+                has_critical = self.refresh_scheduler.has_critical_positions()
+                main_interval = 1.0 if has_critical else MARK_PRICE_FETCH_MAIN_SEC
+
                 try:
-                    # Main exchange: fetch every MARK_PRICE_FETCH_MAIN_SEC
-                    if now - last_price_fetch_main >= MARK_PRICE_FETCH_MAIN_SEC:
+                    # Main exchange: fetch more frequently when critical positions exist
+                    if now - last_price_fetch_main >= main_interval:
                         main_prices = fetch_all_mark_prices_async(main_dex)
                         mark_prices.update(main_prices)
                         last_price_fetch_main = now
-                        logger.debug(f"Fetched {len(main_prices)} main exchange prices")
+                        if has_critical:
+                            logger.debug(f"Fetched {len(main_prices)} main prices (critical mode)")
 
                     # Sub-exchanges: fetch every MARK_PRICE_FETCH_SUB_SEC
                     if now - last_price_fetch_sub >= MARK_PRICE_FETCH_SUB_SEC:
