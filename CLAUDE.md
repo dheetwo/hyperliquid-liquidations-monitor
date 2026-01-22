@@ -208,6 +208,31 @@ Results are sorted by distance to liquidation (closest first).
 - [ ] Historical tracking of positions across scans
 - [ ] Automated Telegram bot for liquidation feed ingestion
 
+## Development Guidelines
+
+### Coding Patterns
+- **SQLite Logging:** Use `SQLiteLoggingHandler` with background thread for batch writes to avoid blocking main application
+- **Database Schema:** Use WAL mode for concurrent reads, proper indexing for query performance
+- **Token Prefix Handling:** API returns `xyz:SILVER` but config uses `SILVER` - always handle both formats when looking up thresholds
+- **Progressive Startup:** Use scan modes (`whale-only`, `shark-incremental`) to gradually increase coverage
+
+### Best Practices
+- **Tiered Refresh:** Classify by liquidation distance - critical positions need frequent updates, normal positions can refresh slowly
+- **Database for State:** SQLite persistence (`MonitorDatabase`) ensures state survives restarts
+- **Error Handling:** Gracefully handle network errors, rate limits, unexpected API responses - use cached data as fallback
+- **Async Operations:** Use `aiohttp` and `asyncio` for concurrent data fetching to improve performance
+- **Data Validation:** Validate file paths (`validate_file_path`) before operations
+
+### Common Pitfalls
+- **Token Naming Mismatch:** `xyz:TOKEN` prefix in API vs `TOKEN` in config - strip prefixes when needed
+- **Cohort Gaps:** Hyperdash cohorts can miss accounts - supplement with liquidation history tracking
+- **Over-reliance on Cohorts:** Some $5M+ accounts may not appear in any cohort - use alternative discovery methods
+
+### Data Protection
+- **Wallet addresses are valuable:** Never clear `known_addresses`, `cohort_cache`, or `liquidation_history.db` without explicit request
+- **Use `--clear-cache`** instead of `--clear-db` for normal cache rebuilds
+- **Liquidation history** is stored separately in `data/liquidation_history.db` and accumulates over time
+
 ## Monitor Service (`src/monitor/`)
 
 Continuous cache-based monitoring service with tiered refresh scheduling.
@@ -370,7 +395,10 @@ export TELEGRAM_CHAT_ID=your_chat_id
 # Start monitor (cache-based, continuous)
 python scripts/run_monitor.py
 
-# Clear database and start fresh
+# Clear cache only (RECOMMENDED - preserves wallet addresses)
+python scripts/run_monitor.py --clear-cache
+
+# Clear ALL database including wallet addresses (use sparingly)
 python scripts/run_monitor.py --clear-db
 
 # Dry run (console alerts only, no Telegram)
@@ -385,6 +413,19 @@ python scripts/run_monitor.py --log-level DEBUG
 # Test Telegram configuration
 python scripts/run_monitor.py --test-telegram
 ```
+
+### Database Protection Policy
+
+**Wallet address data should be non-decreasing** - accumulated address databases are valuable and should not be cleared except explicitly requested.
+
+| Flag | What it clears | What it preserves |
+|------|---------------|-------------------|
+| `--clear-cache` | position_cache, watchlist, baseline | known_addresses, cohort_cache, liquidation_history.db |
+| `--clear-db` | ALL tables in monitor.db | liquidation_history.db (separate database) |
+
+**Two separate databases:**
+- `data/monitor.db` - Position cache, watchlist, known_addresses, cohort_cache
+- `data/liquidation_history.db` - Liquidation events from Telegram feeds (never cleared by --clear-db)
 
 ## Scan Modes (Pipeline CLI Only)
 

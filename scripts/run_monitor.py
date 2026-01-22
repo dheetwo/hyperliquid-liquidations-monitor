@@ -174,7 +174,13 @@ Examples:
     parser.add_argument(
         '--clear-db',
         action='store_true',
-        help='Clear all database tables (watchlist, baseline, caches) before starting'
+        help='Clear ALL database tables INCLUDING wallet addresses (use --clear-cache instead to preserve addresses)'
+    )
+
+    parser.add_argument(
+        '--clear-cache',
+        action='store_true',
+        help='Clear ephemeral cache (position_cache, watchlist, baseline) while preserving wallet addresses'
     )
 
     parser.add_argument(
@@ -228,9 +234,22 @@ Examples:
             print("To set: export TELEGRAM_CHAT_ID=your_chat_id")
             sys.exit(1)
 
-    # Clear database if requested
-    if args.clear_db:
-        print("\nClearing database...")
+    # Clear cache if requested (preserves wallet addresses)
+    if args.clear_cache:
+        print("\nClearing cache (preserving wallet addresses)...")
+        db = MonitorDatabase()
+        db.clear_watchlist()
+        db.clear_baseline()
+        db.clear_position_cache()
+        # Preserve: cohort_cache, known_addresses, liquidation_history.db
+        db.vacuum()
+        print("Cache cleared successfully. Wallet addresses preserved.")
+        logger.info("Cache cleared via --clear-cache flag (wallet addresses preserved)")
+
+    # Clear ALL database if requested (including wallet addresses)
+    elif args.clear_db:
+        print("\n⚠️  WARNING: Clearing ALL database including wallet addresses...")
+        print("   (Use --clear-cache to preserve wallet addresses)")
         db = MonitorDatabase()
         db.clear_watchlist()
         db.clear_baseline()
@@ -240,8 +259,8 @@ Examples:
         # Also clear history/logs if desired for full reset
         db.prune_old_data(history_days=0, alert_days=0, log_days=0)
         db.vacuum()
-        print("Database cleared successfully.")
-        logger.info("Database cleared via --clear-db flag")
+        print("Database cleared successfully (including wallet addresses).")
+        logger.info("Database cleared via --clear-db flag (including wallet addresses)")
 
     # Create and run monitor service
     try:
