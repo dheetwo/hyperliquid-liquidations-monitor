@@ -329,7 +329,7 @@ class WalletDB:
             ).fetchone()[0]
 
             from_liq = conn.execute(
-                "SELECT COUNT(*) FROM wallets WHERE source = 'liq_history'"
+                "SELECT COUNT(*) FROM wallets WHERE source IN ('liq_history', 'liq_feed')"
             ).fetchone()[0]
 
             normal = conn.execute(
