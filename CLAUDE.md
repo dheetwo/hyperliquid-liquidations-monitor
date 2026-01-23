@@ -34,7 +34,8 @@ kolkata/
 │       └── telegram.py         # Telegram bot (placeholder)
 ├── scripts/
 │   ├── run_monitor.py          # Main entry point
-│   ├── import_liq_history.py   # Import from Telegram export
+│   ├── fetch_liq_channel.py    # Scheduled Telegram channel fetch
+│   ├── import_liq_history.py   # One-time import from Telegram export
 │   └── test_apis.py            # Test API clients
 ├── data/
 │   ├── wallets.db              # Wallet registry
@@ -59,11 +60,14 @@ export TELEGRAM_BOT_TOKEN=your_bot_token
 export TELEGRAM_CHAT_ID=your_chat_id
 python3 scripts/run_monitor.py
 
-# Import liquidation history from Telegram export
+# Import liquidation history from Telegram export (one-time)
 python3 scripts/import_liq_history.py telegram_export.json
 
 # Add single address manually
 python3 scripts/import_liq_history.py --add 0x... --notional 500000
+
+# Fetch recent liquidations from Telegram channel (scheduled, no API keys needed)
+python3 scripts/fetch_liq_channel.py
 ```
 
 ## Architecture
@@ -73,7 +77,8 @@ python3 scripts/import_liq_history.py --add 0x... --notional 500000
 ```
 1. WALLET DATABASE (Column A)
    ├── Hyperdash cohorts (kraken, whale, rekt, etc.)
-   └── Telegram liquidation history
+   ├── Telegram liquidation feed (hourly fetch)
+   └── Telegram liquidation history (one-time import)
            ↓
 2. WALLET FILTERING
    ├── Minimum position value: $60K
@@ -135,7 +140,7 @@ request_delay_sec: 0.25
 ```sql
 wallets (
     address TEXT PRIMARY KEY,
-    source TEXT,              -- 'hyperdash' or 'liq_history'
+    source TEXT,              -- 'hyperdash', 'liq_feed', or 'liq_history'
     cohort TEXT,
     position_value REAL,
     scan_frequency TEXT,      -- 'normal' or 'infrequent'
@@ -208,7 +213,7 @@ query GetSizeCohort($id: String!, $limit: Int!, $offset: Int!) {
 
 - `aiohttp` - Async HTTP client
 - `python-dotenv` - Environment variables
-- `requests` - Telegram alerts (sync)
+- `requests` - Telegram alerts (sync), web preview fetching
 
 ## Development Guidelines
 
