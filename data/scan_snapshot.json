@@ -1,0 +1,94 @@
+{
+  "timestamp": "2026-01-23T21:12:49.450089+00:00",
+  "wallet_registry": {
+    "total_wallets": 6026,
+    "normal_frequency": 347,
+    "infrequent": 5679,
+    "from_hyperdash": 3140,
+    "from_liq_sources": 2886,
+    "total_position_value": 2751947801.995239
+  },
+  "position_cache": {
+    "total_positions": 2479,
+    "total_notional": 5154274097.265638,
+    "critical_count": 0,
+    "high_count": 1
+  },
+  "cohort_breakdown": [
+    {
+      "cohort": "very_unprofitable",
+      "total": 1130,
+      "normal": 52,
+      "infrequent": 1078
+    },
+    {
+      "cohort": "shark",
+      "total": 771,
+      "normal": 58,
+      "infrequent": 713
+    },
+    {
+      "cohort": "very_profitable",
+      "total": 526,
+      "normal": 36,
+      "infrequent": 490
+    },
+    {
+      "cohort": "whale",
+      "total": 256,
+      "normal": 44,
+      "infrequent": 212
+    },
+    {
+      "cohort": "large_whale",
+      "total": 242,
+      "normal": 68,
+      "infrequent": 174
+    },
+    {
+      "cohort": "rekt",
+      "total": 112,
+      "normal": 22,
+      "infrequent": 90
+    },
+    {
+      "cohort": "kraken",
+      "total": 61,
+      "normal": 43,
+      "infrequent": 18
+    },
+    {
+      "cohort": "extremely_profitable",
+      "total": 42,
+      "normal": 3,
+      "infrequent": 39
+    }
+  ],
+  "tier_breakdown": [
+    {
+      "tier": "$10M+",
+      "count": 37,
+      "total_value": 2378172422.490866
+    },
+    {
+      "tier": "$1M-$10M",
+      "count": 115,
+      "total_value": 294403020.409934
+    },
+    {
+      "tier": "$100K-$1M",
+      "count": 172,
+      "total_value": 77260936.694875
+    },
+    {
+      "tier": "$60K-$100K",
+      "count": 26,
+      "total_value": 2008976.137384
+    },
+    {
+      "tier": "Below $60K",
+      "count": 5676,
+      "total_value": 102446.26217999999
+    }
+  ]
+}

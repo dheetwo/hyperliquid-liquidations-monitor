@@ -26,6 +26,7 @@ logs/
 
 # Output data (may contain sensitive position info)
 data/
+!data/scan_snapshot.json
 output/
 
 # VPS backup folder (fetched logs/data)
