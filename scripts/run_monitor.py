@@ -63,12 +63,9 @@ async def main():
         position_db.clear()
 
     # Set up alerts
-    alert_callback = None
     telegram_alerts = None
     if not args.dry_run:
         telegram_alerts = TelegramAlerts.from_env()
-        if telegram_alerts:
-            alert_callback = telegram_alerts.as_callback()
 
     # Show initial stats
     wallet_stats = wallet_db.get_stats()
@@ -81,7 +78,7 @@ async def main():
     monitor = Monitor(
         wallet_db=wallet_db,
         position_db=position_db,
-        alert_callback=alert_callback,
+        telegram_alerts=telegram_alerts,
         dry_run=args.dry_run,
     )
 

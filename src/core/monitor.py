@@ -12,7 +12,7 @@ Main monitoring loop that:
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, TYPE_CHECKING
 
 from ..config import Position, Bucket, config
 from ..api.hyperliquid import HyperliquidClient
@@ -20,6 +20,9 @@ from ..api.hyperdash import HyperdashClient
 from ..db.wallet_db import WalletDB
 from ..db.position_db import PositionDB, CachedPosition
 from .position_fetcher import PositionFetcher
+
+if TYPE_CHECKING:
+    from ..alerts.telegram import TelegramAlerts
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,7 @@ class Monitor:
         self,
         wallet_db: WalletDB = None,
         position_db: PositionDB = None,
-        alert_callback: Callable[[str, str], None] = None,
+        telegram_alerts: "TelegramAlerts" = None,
         dry_run: bool = False,
     ):
         """
@@ -49,12 +52,12 @@ class Monitor:
         Args:
             wallet_db: Wallet registry database
             position_db: Position cache database
-            alert_callback: Callback(message, priority) for alerts
+            telegram_alerts: TelegramAlerts instance for rich alerts
             dry_run: If True, log alerts instead of sending
         """
         self.wallet_db = wallet_db or WalletDB()
         self.position_db = position_db or PositionDB()
-        self.alert_callback = alert_callback
+        self.telegram_alerts = telegram_alerts
         self.dry_run = dry_run
 
         self._client: Optional[HyperliquidClient] = None
@@ -190,22 +193,11 @@ class Monitor:
         # Check for proximity alert
         if distance is not None:
             if distance <= config.proximity_alert_pct and not cached.alerted_proximity:
-                await self._send_alert(
-                    f"APPROACHING LIQUIDATION: {position.token} {position.side} "
-                    f"${position.position_value:,.0f} at {distance:.2f}% to liq",
-                    "proximity",
-                    cached.key,
-                )
+                await self._send_proximity_alert(position, distance)
                 self.position_db.set_alerted_proximity(cached.key)
 
             if distance <= config.critical_alert_pct and not cached.alerted_critical:
-                await self._send_alert(
-                    f"IMMINENT LIQUIDATION: {position.token} {position.side} "
-                    f"${position.position_value:,.0f} at {distance:.2f}% to liq "
-                    f"(liq price: ${position.liquidation_price:,.2f})",
-                    "critical",
-                    cached.key,
-                )
+                await self._send_critical_alert(position, distance)
                 self.position_db.set_alerted_critical(cached.key)
 
         # Update position in database
@@ -353,17 +345,61 @@ class Monitor:
         logger.info(f"  Normal (>0.25%): {stats.total_positions - stats.critical_count - stats.high_count:,}")
         logger.info("=" * 60)
 
-    async def _send_alert(self, message: str, priority: str, position_key: str):
-        """Send an alert."""
+    async def _send_proximity_alert(self, position: Position, distance: float):
+        """Send proximity (APPROACHING LIQUIDATION) alert."""
         if self.dry_run:
-            logger.info(f"[DRY RUN] Alert ({priority}): {message}")
-        elif self.alert_callback:
+            logger.info(
+                f"[DRY RUN] APPROACHING LIQUIDATION: {position.token} {position.side} "
+                f"${position.position_value:,.0f} at {distance:.2f}%"
+            )
+        elif self.telegram_alerts:
             try:
-                self.alert_callback(message, priority)
+                self.telegram_alerts.send_proximity_alert(
+                    token=position.token,
+                    side=position.side,
+                    address=position.address,
+                    distance_pct=distance,
+                    liq_price=position.liquidation_price,
+                    mark_price=position.mark_price,
+                    position_value=position.position_value,
+                    is_isolated=position.leverage_type.lower() == "isolated",
+                    exchange=position.exchange,
+                )
             except Exception as e:
-                logger.error(f"Failed to send alert: {e}")
+                logger.error(f"Failed to send proximity alert: {e}")
         else:
-            logger.info(f"Alert ({priority}): {message}")
+            logger.info(
+                f"APPROACHING LIQUIDATION: {position.token} {position.side} "
+                f"${position.position_value:,.0f} at {distance:.2f}%"
+            )
+
+    async def _send_critical_alert(self, position: Position, distance: float):
+        """Send critical (IMMINENT LIQUIDATION) alert."""
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] IMMINENT LIQUIDATION: {position.token} {position.side} "
+                f"${position.position_value:,.0f} at {distance:.3f}%"
+            )
+        elif self.telegram_alerts:
+            try:
+                self.telegram_alerts.send_critical_alert(
+                    token=position.token,
+                    side=position.side,
+                    address=position.address,
+                    distance_pct=distance,
+                    liq_price=position.liquidation_price,
+                    mark_price=position.mark_price,
+                    position_value=position.position_value,
+                    is_isolated=position.leverage_type.lower() == "isolated",
+                    exchange=position.exchange,
+                )
+            except Exception as e:
+                logger.error(f"Failed to send critical alert: {e}")
+        else:
+            logger.info(
+                f"IMMINENT LIQUIDATION: {position.token} {position.side} "
+                f"${position.position_value:,.0f} at {distance:.3f}%"
+            )
 
 
 # =============================================================================
