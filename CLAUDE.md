@@ -66,10 +66,8 @@ python3 scripts/import_liq_history.py telegram_export.json
 # Add single address manually
 python3 scripts/import_liq_history.py --add 0x... --notional 500000
 
-# Fetch recent liquidations from Telegram channel (scheduled)
-export TELEGRAM_API_ID=your_api_id
-export TELEGRAM_API_HASH=your_api_hash
-python3 scripts/fetch_liq_channel.py --hours 1
+# Fetch recent liquidations from Telegram channel (scheduled, no API keys needed)
+python3 scripts/fetch_liq_channel.py
 ```
 
 ## Architecture
@@ -215,8 +213,7 @@ query GetSizeCohort($id: String!, $limit: Int!, $offset: Int!) {
 
 - `aiohttp` - Async HTTP client
 - `python-dotenv` - Environment variables
-- `requests` - Telegram alerts (sync)
-- `telethon` - Telegram API client (for liquidation channel fetch)
+- `requests` - Telegram alerts (sync), web preview fetching
 
 ## Development Guidelines
 

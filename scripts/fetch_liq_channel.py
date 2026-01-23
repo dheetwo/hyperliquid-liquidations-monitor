@@ -1,39 +1,32 @@
 #!/usr/bin/env python3
 """
-Fetch liquidation messages from Telegram channel.
+Fetch liquidation messages from Telegram channel via web preview.
 
 Scheduled script that fetches recent messages from @liquidations_hyperliquid
-and adds qualifying addresses to the wallet registry.
+using Telegram's public web preview (no API credentials required) and adds
+qualifying addresses to the wallet registry.
 
 Usage:
-    # Set environment variables
-    export TELEGRAM_API_ID=your_api_id
-    export TELEGRAM_API_HASH=your_api_hash
-
-    # Run fetch (fetches last hour of messages)
+    # Run fetch (fetches recent messages from web preview)
     python scripts/fetch_liq_channel.py
-
-    # Fetch specific time window
-    python scripts/fetch_liq_channel.py --hours 2
 
     # Dry run (don't add to database)
     python scripts/fetch_liq_channel.py --dry-run
 
-Requirements:
-    pip install telethon
-
 Cron setup (hourly):
     0 * * * * cd /path/to/kolkata && python scripts/fetch_liq_channel.py >> logs/liq_fetch.log 2>&1
+
+No API credentials required - uses public web preview at t.me/s/channel_name
 """
 
 import argparse
-import asyncio
 import logging
-import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
+
+import requests
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -106,64 +99,82 @@ def parse_message_text(text: str) -> tuple | None:
 
 
 # =============================================================================
-# Telegram Client
+# Web Preview Fetcher
 # =============================================================================
 
-async def fetch_channel_messages(
-    api_id: int,
-    api_hash: str,
-    channel: str,
-    hours: float,
-    session_path: Path,
-) -> list:
+def fetch_channel_messages(channel: str) -> list[str]:
     """
-    Fetch recent messages from a Telegram channel.
+    Fetch recent messages from a Telegram channel via web preview.
+
+    Uses https://t.me/s/channel_name which shows recent messages publicly.
+    No API credentials required.
 
     Args:
-        api_id: Telegram API ID
-        api_hash: Telegram API hash
         channel: Channel username (without @)
-        hours: How far back to fetch
-        session_path: Path to store session file
 
     Returns:
         List of message text strings
     """
-    try:
-        from telethon import TelegramClient
-        from telethon.tl.functions.messages import GetHistoryRequest
-    except ImportError:
-        logger.error("Telethon not installed. Run: pip install telethon")
-        sys.exit(1)
+    url = f"https://t.me/s/{channel}"
 
-    # Calculate cutoff time
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.error(f"Failed to fetch channel: {e}")
+        return []
+
+    html = response.text
+
+    # Extract message text from the HTML
+    # Messages are in <div class="tgme_widget_message_text">...</div>
+    message_pattern = re.compile(
+        r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+        re.DOTALL
+    )
+
+    # Also extract links which contain addresses
+    # Links are in <a href="...">...</a> within messages
+    link_pattern = re.compile(r'href="([^"]*0x[a-fA-F0-9]{40}[^"]*)"')
 
     messages = []
+    for match in message_pattern.finditer(html):
+        msg_html = match.group(1)
 
-    async with TelegramClient(str(session_path), api_id, api_hash) as client:
-        # Get channel entity
-        try:
-            entity = await client.get_entity(channel)
-        except Exception as e:
-            logger.error(f"Could not find channel {channel}: {e}")
-            return []
+        # Clean HTML tags but preserve text
+        # Replace <br> with newlines
+        text = re.sub(r'<br\s*/?>', '\n', msg_html)
+        # Remove other tags but keep content
+        text = re.sub(r'<[^>]+>', ' ', text)
+        # Decode HTML entities
+        text = text.replace('&#036;', '$')
+        text = text.replace('&amp;', '&')
+        text = text.replace('&lt;', '<')
+        text = text.replace('&gt;', '>')
+        text = text.replace('&#39;', "'")
+        text = text.replace('&quot;', '"')
+        text = text.replace('&nbsp;', ' ')
+        # Clean up whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
 
-        logger.info(f"Fetching messages from @{channel} since {cutoff.isoformat()}")
+        # Also try to find address in links within this message block
+        links = link_pattern.findall(msg_html)
+        for link in links:
+            addr_match = ADDRESS_PATTERN.search(link)
+            if addr_match:
+                # Append address to text if not already present
+                addr = addr_match.group(0)
+                if addr.lower() not in text.lower():
+                    text = f"{text} {addr}"
 
-        # Fetch messages
-        async for message in client.iter_messages(entity, offset_date=datetime.now(timezone.utc)):
-            # Stop if we've gone past our time window
-            if message.date < cutoff:
-                break
+        if text:
+            messages.append(text)
 
-            # Get message text
-            text = message.text or message.raw_text or ""
-            if text:
-                messages.append(text)
-
-        logger.info(f"Fetched {len(messages)} messages")
-
+    logger.info(f"Fetched {len(messages)} messages from web preview")
     return messages
 
 
@@ -271,14 +282,8 @@ def process_messages(
     }
 
 
-async def main():
+def main():
     parser = argparse.ArgumentParser(description="Fetch liquidation messages from Telegram")
-    parser.add_argument(
-        "--hours",
-        type=float,
-        default=1.0,
-        help="Hours of history to fetch (default: 1)"
-    )
     parser.add_argument(
         "--channel",
         default="liquidations_hyperliquid",
@@ -300,45 +305,14 @@ async def main():
         type=Path,
         help="Path to wallet database"
     )
-    parser.add_argument(
-        "--session-path",
-        type=Path,
-        help="Path to Telethon session file"
-    )
 
     args = parser.parse_args()
-
-    # Get Telegram credentials from environment
-    api_id = os.environ.get("TELEGRAM_API_ID")
-    api_hash = os.environ.get("TELEGRAM_API_HASH")
-
-    if not api_id or not api_hash:
-        logger.error("Missing TELEGRAM_API_ID or TELEGRAM_API_HASH environment variables")
-        logger.error("Get these from https://my.telegram.org/apps")
-        sys.exit(1)
-
-    try:
-        api_id = int(api_id)
-    except ValueError:
-        logger.error("TELEGRAM_API_ID must be an integer")
-        sys.exit(1)
-
-    # Set up paths
-    project_root = Path(__file__).parent.parent
-    session_path = args.session_path or project_root / "data" / "telegram_session"
-    session_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Initialize wallet DB
     wallet_db = WalletDB(args.db_path) if args.db_path else WalletDB()
 
-    # Fetch messages
-    messages = await fetch_channel_messages(
-        api_id=api_id,
-        api_hash=api_hash,
-        channel=args.channel,
-        hours=args.hours,
-        session_path=session_path,
-    )
+    # Fetch messages from web preview
+    messages = fetch_channel_messages(args.channel)
 
     if not messages:
         logger.info("No messages to process")
@@ -360,4 +334,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
