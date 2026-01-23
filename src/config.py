@@ -218,11 +218,12 @@ class Config:
     hyperdash_url: str = "https://api.hyperdash.com/graphql"
 
     # Concurrent requests for batch fetching
-    # Hyperliquid has strict rate limits - keep concurrency low
-    max_concurrent_requests: int = 5
+    # Hyperliquid read endpoints can handle moderate concurrency
+    # Higher values trigger rate limiting; 10-15 is the sweet spot
+    max_concurrent_requests: int = 10
 
     # Delay between API requests (seconds)
-    request_delay_sec: float = 0.25  # 250ms between requests
+    request_delay_sec: float = 0.1  # 100ms between requests
 
     # Rate limiting backoff (seconds)
     rate_limit_backoff_sec: float = 2.0

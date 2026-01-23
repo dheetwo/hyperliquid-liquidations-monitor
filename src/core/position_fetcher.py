@@ -57,7 +57,7 @@ class PositionFetcher:
         exchanges: List[str] = None,
     ) -> List[Position]:
         """
-        Fetch all positions for a single address across exchanges.
+        Fetch all positions for a single address across exchanges in parallel.
 
         Args:
             address: Wallet address
@@ -70,12 +70,21 @@ class PositionFetcher:
             self.client = HyperliquidClient()
 
         exchanges = exchanges or self.exchanges
+
+        # Fetch all exchanges in parallel for this address
+        tasks = [self.client.get_positions(address, ex) for ex in exchanges]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
         all_positions = []
+        for i, positions in enumerate(results):
+            if isinstance(positions, Exception):
+                logger.debug(f"Error fetching {exchanges[i]} for {address[:10]}...: {positions}")
+                continue
+            if not positions:
+                continue
 
-        for exchange in exchanges:
-            positions = await self.client.get_positions(address, exchange)
-
-            # Update mark prices from position data
+            exchange = exchanges[i]
+            # Update mark prices from cached data
             for p in positions:
                 price = self.get_mark_price(p.token, exchange)
                 if price:
