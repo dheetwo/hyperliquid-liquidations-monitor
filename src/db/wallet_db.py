@@ -358,6 +358,53 @@ class WalletDB:
                 total_position_value=total_value,
             )
 
+    def get_cohort_breakdown(self) -> List[tuple]:
+        """
+        Get wallet count by cohort for Hyperdash wallets.
+
+        Returns:
+            List of (cohort, count, normal_count, infrequent_count) tuples
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute("""
+                SELECT
+                    cohort,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN scan_frequency = 'normal' THEN 1 ELSE 0 END) as normal,
+                    SUM(CASE WHEN scan_frequency = 'infrequent' THEN 1 ELSE 0 END) as infreq
+                FROM wallets
+                WHERE source = 'hyperdash' AND cohort IS NOT NULL
+                GROUP BY cohort
+                ORDER BY total DESC
+            """).fetchall()
+            return rows
+
+    def get_tier_breakdown(self) -> List[tuple]:
+        """
+        Get wallet count by position value tier.
+
+        Returns:
+            List of (tier_name, count, total_value) tuples
+        """
+        tiers = [
+            ("$10M+", 10_000_000, float('inf')),
+            ("$1M-$10M", 1_000_000, 10_000_000),
+            ("$100K-$1M", 100_000, 1_000_000),
+            ("$60K-$100K", 60_000, 100_000),
+            ("Below $60K", 0, 60_000),
+        ]
+
+        results = []
+        with sqlite3.connect(self.db_path) as conn:
+            for name, low, high in tiers:
+                row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(position_value), 0) FROM wallets WHERE position_value >= ? AND position_value < ?",
+                    (low, high)
+                ).fetchone()
+                results.append((name, row[0], row[1]))
+
+        return results
+
     # -------------------------------------------------------------------------
     # Private Helpers
     # -------------------------------------------------------------------------

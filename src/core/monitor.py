@@ -299,13 +299,52 @@ class Monitor:
 
         logger.info(f"Discovery complete. Next discovery in {interval_minutes} minutes")
 
-        # Log stats
+        # Log detailed summaries
+        self._log_wallet_summary()
+        self._log_position_summary()
+
+    def _log_wallet_summary(self):
+        """Log detailed wallet registry summary."""
+        logger.info("=" * 60)
+        logger.info("WALLET REGISTRY SUMMARY")
+        logger.info("=" * 60)
+
+        # Basic stats
+        stats = self.wallet_db.get_stats()
+        logger.info(f"Total wallets: {stats.total_wallets:,}")
+        logger.info(f"  From Hyperdash: {stats.from_hyperdash:,}")
+        logger.info(f"  From Liq History: {stats.from_liq_history:,}")
+        logger.info(f"  Normal frequency: {stats.normal_frequency:,} ({stats.normal_frequency/max(stats.total_wallets,1)*100:.0f}%)")
+        logger.info(f"  Infrequent: {stats.infrequent:,} ({stats.infrequent/max(stats.total_wallets,1)*100:.0f}%)")
+
+        # Cohort breakdown
+        cohorts = self.wallet_db.get_cohort_breakdown()
+        if cohorts:
+            logger.info("Hyperdash cohorts:")
+            for cohort, total, normal, infreq in cohorts:
+                logger.info(f"  {cohort}: {total:,} ({normal:,} normal, {infreq:,} infreq)")
+
+        # Tier breakdown
+        tiers = self.wallet_db.get_tier_breakdown()
+        logger.info("Position value tiers:")
+        for tier_name, count, total_value in tiers:
+            if count > 0:
+                logger.info(f"  {tier_name}: {count:,} wallets (${total_value:,.0f})")
+
+    def _log_position_summary(self):
+        """Log position cache summary."""
         stats = self.position_db.get_stats()
+        logger.info("-" * 60)
+        logger.info("POSITION CACHE SUMMARY")
+        logger.info("-" * 60)
         logger.info(
-            f"Position stats: {stats.total_positions} total, "
-            f"{stats.critical_count} critical, {stats.high_count} high, "
-            f"${stats.total_notional:,.0f} notional"
+            f"Total positions: {stats.total_positions:,} "
+            f"(${stats.total_notional:,.0f} notional)"
         )
+        logger.info(f"  Critical (<=0.125%): {stats.critical_count:,}")
+        logger.info(f"  High (0.125-0.25%): {stats.high_count:,}")
+        logger.info(f"  Normal (>0.25%): {stats.total_positions - stats.critical_count - stats.high_count:,}")
+        logger.info("=" * 60)
 
     async def _send_alert(self, message: str, priority: str, position_key: str):
         """Send an alert."""
