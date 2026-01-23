@@ -80,8 +80,12 @@ class Monitor:
         await self._client._ensure_session()
         self._fetcher = PositionFetcher(self._client)
 
-        # Initial discovery
-        await self._run_discovery()
+        # Initial discovery - don't crash on failure, continue with empty cache
+        try:
+            await self._run_discovery()
+        except Exception as e:
+            logger.error(f"Initial discovery failed: {e}, continuing with empty cache")
+            # Discovery will be retried in the main loop
 
         # Main loop
         try:
@@ -223,28 +227,31 @@ class Monitor:
         addresses = [w.address for w in wallets]
 
         # Also fetch fresh cohort data from Hyperdash
-        async with HyperdashClient() as dash_client:
-            unique_wallets = await dash_client.get_unique_addresses(config.cohorts)
+        try:
+            async with HyperdashClient() as dash_client:
+                unique_wallets = await dash_client.get_unique_addresses(config.cohorts)
 
-            # Add new wallets to registry
-            new_wallets = []
-            for addr, wallet_info in unique_wallets.items():
-                if addr not in addresses:
-                    # Classify based on totalNotional from Hyperdash
-                    freq = "normal" if wallet_info.total_notional >= config.min_wallet_value else "infrequent"
-                    new_wallets.append({
-                        "address": addr,
-                        "source": "hyperdash",
-                        "cohort": wallet_info.cohort,
-                        "position_value": wallet_info.total_notional,
-                        "scan_frequency": freq,
-                    })
-                    addresses.append(addr)
+                # Add new wallets to registry
+                new_wallets = []
+                for addr, wallet_info in unique_wallets.items():
+                    if addr not in addresses:
+                        # Classify based on totalNotional from Hyperdash
+                        freq = "normal" if wallet_info.total_notional >= config.min_wallet_value else "infrequent"
+                        new_wallets.append({
+                            "address": addr,
+                            "source": "hyperdash",
+                            "cohort": wallet_info.cohort,
+                            "position_value": wallet_info.total_notional,
+                            "scan_frequency": freq,
+                        })
+                        addresses.append(addr)
 
-            if new_wallets:
-                new_count, _ = self.wallet_db.add_wallets_batch(new_wallets)
-                normal_count = sum(1 for w in new_wallets if w["scan_frequency"] == "normal")
-                logger.info(f"Added {new_count} new wallets from Hyperdash ({normal_count} normal, {new_count - normal_count} infrequent)")
+                if new_wallets:
+                    new_count, _ = self.wallet_db.add_wallets_batch(new_wallets)
+                    normal_count = sum(1 for w in new_wallets if w["scan_frequency"] == "normal")
+                    logger.info(f"Added {new_count} new wallets from Hyperdash ({normal_count} normal, {new_count - normal_count} infrequent)")
+        except Exception as e:
+            logger.warning(f"Failed to fetch Hyperdash cohorts: {e}, continuing with existing wallets")
 
         if not addresses:
             logger.warning("No addresses to scan")

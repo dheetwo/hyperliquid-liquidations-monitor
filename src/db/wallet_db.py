@@ -7,14 +7,22 @@ This is the source of truth for which wallets to scan.
 
 import sqlite3
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, TypeVar
 from dataclasses import dataclass
 
 from ..config import Wallet, config
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# Database connection settings
+DB_TIMEOUT = 10.0  # seconds
+DB_RETRIES = 3
+DB_RETRY_BACKOFF = 0.5  # seconds
 
 
 @dataclass
@@ -39,36 +47,84 @@ class WalletDB:
 
     def __init__(self, db_path: Path = None):
         self.db_path = db_path or config.wallets_db_path
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.error(f"Failed to create database directory: {e}")
+            raise
         self._init_db()
+
+    def _execute_with_retry(
+        self,
+        operation: Callable[[], T],
+        retries: int = DB_RETRIES,
+        backoff: float = DB_RETRY_BACKOFF,
+    ) -> T:
+        """
+        Execute a database operation with retry logic for locked database.
+
+        Args:
+            operation: Callable that performs the database operation
+            retries: Number of retry attempts
+            backoff: Initial backoff time in seconds (doubles each retry)
+
+        Returns:
+            Result of the operation
+
+        Raises:
+            sqlite3.Error: If all retries fail
+        """
+        last_error = None
+        for attempt in range(retries):
+            try:
+                return operation()
+            except sqlite3.OperationalError as e:
+                last_error = e
+                if "locked" in str(e).lower() and attempt < retries - 1:
+                    wait_time = backoff * (2 ** attempt)
+                    logger.warning(
+                        f"Database locked, retrying in {wait_time:.1f}s "
+                        f"({attempt + 1}/{retries})"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                raise
+            except sqlite3.Error as e:
+                logger.error(f"Database error: {e}")
+                raise
+        raise last_error
 
     def _init_db(self):
         """Initialize database schema."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS wallets (
-                    address TEXT PRIMARY KEY,
-                    source TEXT NOT NULL,
-                    cohort TEXT,
-                    position_value REAL,
-                    total_collateral REAL,
-                    position_count INTEGER,
-                    scan_frequency TEXT DEFAULT 'normal',
-                    first_seen TEXT NOT NULL,
-                    last_scanned TEXT,
-                    scan_count INTEGER DEFAULT 0
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_wallets_frequency
-                ON wallets(scan_frequency)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_wallets_last_scanned
-                ON wallets(last_scanned)
-            """)
-            conn.commit()
+        try:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS wallets (
+                        address TEXT PRIMARY KEY,
+                        source TEXT NOT NULL,
+                        cohort TEXT,
+                        position_value REAL,
+                        total_collateral REAL,
+                        position_count INTEGER,
+                        scan_frequency TEXT DEFAULT 'normal',
+                        first_seen TEXT NOT NULL,
+                        last_scanned TEXT,
+                        scan_count INTEGER DEFAULT 0
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_wallets_frequency
+                    ON wallets(scan_frequency)
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_wallets_last_scanned
+                    ON wallets(last_scanned)
+                """)
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Failed to initialize wallet database: {e}")
+            raise
 
     # -------------------------------------------------------------------------
     # Add / Update Wallets
@@ -102,51 +158,54 @@ class WalletDB:
         if scan_frequency is None:
             scan_frequency = "normal" if source == "hyperdash" else "infrequent"
 
-        with sqlite3.connect(self.db_path) as conn:
-            # Check if exists
-            existing = conn.execute(
-                "SELECT address, scan_frequency FROM wallets WHERE address = ?",
-                (address,)
-            ).fetchone()
+        def _do_add():
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
+                # Check if exists
+                existing = conn.execute(
+                    "SELECT address, scan_frequency FROM wallets WHERE address = ?",
+                    (address,)
+                ).fetchone()
 
-            if existing:
-                # Update existing wallet (keep source, update cohort/value if provided)
-                updates = []
-                params = []
+                if existing:
+                    # Update existing wallet (keep source, update cohort/value if provided)
+                    updates = []
+                    params = []
 
-                if cohort is not None:
-                    updates.append("cohort = ?")
-                    params.append(cohort)
+                    if cohort is not None:
+                        updates.append("cohort = ?")
+                        params.append(cohort)
 
-                if position_value is not None:
-                    updates.append("position_value = ?")
-                    params.append(position_value)
+                    if position_value is not None:
+                        updates.append("position_value = ?")
+                        params.append(position_value)
 
-                # Only upgrade frequency (infrequent -> normal), never downgrade
-                if scan_frequency == "normal" and existing[1] == "infrequent":
-                    updates.append("scan_frequency = ?")
-                    params.append("normal")
+                    # Only upgrade frequency (infrequent -> normal), never downgrade
+                    if scan_frequency == "normal" and existing[1] == "infrequent":
+                        updates.append("scan_frequency = ?")
+                        params.append("normal")
 
-                if updates:
-                    params.append(address)
-                    conn.execute(
-                        f"UPDATE wallets SET {', '.join(updates)} WHERE address = ?",
-                        params
-                    )
+                    if updates:
+                        params.append(address)
+                        conn.execute(
+                            f"UPDATE wallets SET {', '.join(updates)} WHERE address = ?",
+                            params
+                        )
+                        conn.commit()
+
+                    return False  # Not new
+
+                else:
+                    # Insert new wallet
+                    conn.execute("""
+                        INSERT INTO wallets
+                        (address, source, cohort, position_value, first_seen, scan_frequency)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (address, source, cohort, position_value, now, scan_frequency))
                     conn.commit()
 
-                return False  # Not new
+                    return True  # New wallet
 
-            else:
-                # Insert new wallet
-                conn.execute("""
-                    INSERT INTO wallets
-                    (address, source, cohort, position_value, first_seen, scan_frequency)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (address, source, cohort, position_value, now, scan_frequency))
-                conn.commit()
-
-                return True  # New wallet
+        return self._execute_with_retry(_do_add)
 
     def add_wallets_batch(
         self,
@@ -167,58 +226,68 @@ class WalletDB:
             Tuple of (new_count, updated_count)
         """
         now = datetime.now(timezone.utc).isoformat()
-        new_count = 0
-        updated_count = 0
 
-        with sqlite3.connect(self.db_path) as conn:
-            for w in wallets:
-                address = w["address"].lower()
-                source = w["source"]
-                cohort = w.get("cohort")
-                position_value = w.get("position_value")
-                scan_frequency = w.get("scan_frequency", "normal")
+        def _do_batch():
+            new_count = 0
+            updated_count = 0
 
-                # Check if exists
-                existing = conn.execute(
-                    "SELECT address, scan_frequency FROM wallets WHERE address = ?",
-                    (address,)
-                ).fetchone()
+            conn = sqlite3.connect(self.db_path, timeout=DB_TIMEOUT)
+            try:
+                for w in wallets:
+                    address = w["address"].lower()
+                    source = w["source"]
+                    cohort = w.get("cohort")
+                    position_value = w.get("position_value")
+                    scan_frequency = w.get("scan_frequency", "normal")
 
-                if existing:
-                    # Update existing wallet
-                    updates = []
-                    params = []
+                    # Check if exists
+                    existing = conn.execute(
+                        "SELECT address, scan_frequency FROM wallets WHERE address = ?",
+                        (address,)
+                    ).fetchone()
 
-                    if cohort:
-                        updates.append("cohort = ?")
-                        params.append(cohort)
+                    if existing:
+                        # Update existing wallet
+                        updates = []
+                        params = []
 
-                    if position_value is not None:
-                        updates.append("position_value = ?")
-                        params.append(position_value)
+                        if cohort:
+                            updates.append("cohort = ?")
+                            params.append(cohort)
 
-                    # Only upgrade frequency (infrequent -> normal), never downgrade
-                    if scan_frequency == "normal" and existing[1] == "infrequent":
-                        updates.append("scan_frequency = ?")
-                        params.append("normal")
+                        if position_value is not None:
+                            updates.append("position_value = ?")
+                            params.append(position_value)
 
-                    if updates:
-                        params.append(address)
-                        conn.execute(
-                            f"UPDATE wallets SET {', '.join(updates)} WHERE address = ?",
-                            params
-                        )
-                    updated_count += 1
-                else:
-                    conn.execute("""
-                        INSERT INTO wallets
-                        (address, source, cohort, position_value, first_seen, scan_frequency)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (address, source, cohort, position_value, now, scan_frequency))
-                    new_count += 1
+                        # Only upgrade frequency (infrequent -> normal), never downgrade
+                        if scan_frequency == "normal" and existing[1] == "infrequent":
+                            updates.append("scan_frequency = ?")
+                            params.append("normal")
 
-            conn.commit()
+                        if updates:
+                            params.append(address)
+                            conn.execute(
+                                f"UPDATE wallets SET {', '.join(updates)} WHERE address = ?",
+                                params
+                            )
+                        updated_count += 1
+                    else:
+                        conn.execute("""
+                            INSERT INTO wallets
+                            (address, source, cohort, position_value, first_seen, scan_frequency)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (address, source, cohort, position_value, now, scan_frequency))
+                        new_count += 1
 
+                conn.commit()
+                return new_count, updated_count
+            except sqlite3.Error:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        new_count, updated_count = self._execute_with_retry(_do_batch)
         logger.info(f"Added {new_count} new wallets, updated {updated_count}")
         return new_count, updated_count
 
@@ -249,19 +318,22 @@ class WalletDB:
         else:
             scan_frequency = "infrequent"
 
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                UPDATE wallets
-                SET position_value = ?,
-                    total_collateral = ?,
-                    position_count = ?,
-                    scan_frequency = ?,
-                    last_scanned = ?,
-                    scan_count = scan_count + 1
-                WHERE address = ?
-            """, (position_value, total_collateral, position_count,
-                  scan_frequency, now, address))
-            conn.commit()
+        def _do_update():
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
+                conn.execute("""
+                    UPDATE wallets
+                    SET position_value = ?,
+                        total_collateral = ?,
+                        position_count = ?,
+                        scan_frequency = ?,
+                        last_scanned = ?,
+                        scan_count = scan_count + 1
+                    WHERE address = ?
+                """, (position_value, total_collateral, position_count,
+                      scan_frequency, now, address))
+                conn.commit()
+
+        self._execute_with_retry(_do_update)
 
     # -------------------------------------------------------------------------
     # Query Wallets
@@ -281,7 +353,7 @@ class WalletDB:
         Returns:
             List of Wallet objects to scan
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.row_factory = sqlite3.Row
 
             if include_infrequent:
@@ -304,7 +376,7 @@ class WalletDB:
         """Get a single wallet by address."""
         address = address.lower()
 
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT * FROM wallets WHERE address = ?",
@@ -315,47 +387,59 @@ class WalletDB:
 
     def get_all_addresses(self) -> List[str]:
         """Get all wallet addresses."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             rows = conn.execute("SELECT address FROM wallets").fetchall()
             return [row[0] for row in rows]
 
     def get_stats(self) -> WalletStats:
         """Get statistics about the wallet registry."""
-        with sqlite3.connect(self.db_path) as conn:
-            total = conn.execute("SELECT COUNT(*) FROM wallets").fetchone()[0]
+        try:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
+                total = conn.execute("SELECT COUNT(*) FROM wallets").fetchone()[0]
 
-            from_hyperdash = conn.execute(
-                "SELECT COUNT(*) FROM wallets WHERE source = 'hyperdash'"
-            ).fetchone()[0]
+                from_hyperdash = conn.execute(
+                    "SELECT COUNT(*) FROM wallets WHERE source = 'hyperdash'"
+                ).fetchone()[0]
 
-            from_liq = conn.execute(
-                "SELECT COUNT(*) FROM wallets WHERE source IN ('liq_history', 'liq_feed')"
-            ).fetchone()[0]
+                from_liq = conn.execute(
+                    "SELECT COUNT(*) FROM wallets WHERE source IN ('liq_history', 'liq_feed')"
+                ).fetchone()[0]
 
-            normal = conn.execute(
-                "SELECT COUNT(*) FROM wallets WHERE scan_frequency = 'normal'"
-            ).fetchone()[0]
+                normal = conn.execute(
+                    "SELECT COUNT(*) FROM wallets WHERE scan_frequency = 'normal'"
+                ).fetchone()[0]
 
-            infrequent = conn.execute(
-                "SELECT COUNT(*) FROM wallets WHERE scan_frequency = 'infrequent'"
-            ).fetchone()[0]
+                infrequent = conn.execute(
+                    "SELECT COUNT(*) FROM wallets WHERE scan_frequency = 'infrequent'"
+                ).fetchone()[0]
 
-            never = conn.execute(
-                "SELECT COUNT(*) FROM wallets WHERE last_scanned IS NULL"
-            ).fetchone()[0]
+                never = conn.execute(
+                    "SELECT COUNT(*) FROM wallets WHERE last_scanned IS NULL"
+                ).fetchone()[0]
 
-            total_value = conn.execute(
-                "SELECT COALESCE(SUM(position_value), 0) FROM wallets"
-            ).fetchone()[0]
+                total_value = conn.execute(
+                    "SELECT COALESCE(SUM(position_value), 0) FROM wallets"
+                ).fetchone()[0]
 
+                return WalletStats(
+                    total_wallets=total,
+                    from_hyperdash=from_hyperdash,
+                    from_liq_history=from_liq,
+                    normal_frequency=normal,
+                    infrequent=infrequent,
+                    never_scanned=never,
+                    total_position_value=total_value,
+                )
+        except sqlite3.Error as e:
+            logger.error(f"Failed to get wallet stats: {e}")
             return WalletStats(
-                total_wallets=total,
-                from_hyperdash=from_hyperdash,
-                from_liq_history=from_liq,
-                normal_frequency=normal,
-                infrequent=infrequent,
-                never_scanned=never,
-                total_position_value=total_value,
+                total_wallets=0,
+                from_hyperdash=0,
+                from_liq_history=0,
+                normal_frequency=0,
+                infrequent=0,
+                never_scanned=0,
+                total_position_value=0,
             )
 
     def get_cohort_breakdown(self) -> List[tuple]:
@@ -365,7 +449,7 @@ class WalletDB:
         Returns:
             List of (cohort, count, normal_count, infrequent_count) tuples
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             rows = conn.execute("""
                 SELECT
                     cohort,
@@ -395,7 +479,7 @@ class WalletDB:
         ]
 
         results = []
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             for name, low, high in tiers:
                 row = conn.execute(
                     "SELECT COUNT(*), COALESCE(SUM(position_value), 0) FROM wallets WHERE position_value >= ? AND position_value < ?",

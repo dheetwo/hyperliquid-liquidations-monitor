@@ -21,46 +21,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.db.wallet_db import WalletDB
 from src.db.position_db import PositionDB
 from src.core.monitor import Monitor
+from src.alerts import TelegramAlerts
 
 logger = logging.getLogger(__name__)
-
-
-def setup_telegram_alerts():
-    """Set up Telegram alert callback if configured."""
-    import os
-
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-
-    if not bot_token or not chat_id:
-        logger.warning("Telegram not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
-        return None
-
-    import requests
-
-    def send_alert(message: str, priority: str):
-        """Send alert via Telegram."""
-        prefix = {
-            "critical": "IMMINENT LIQUIDATION",
-            "proximity": "APPROACHING LIQUIDATION",
-        }.get(priority, "")
-
-        text = f"{prefix}\n{message}" if prefix else message
-
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                },
-                timeout=10,
-            )
-        except Exception as e:
-            logger.error(f"Failed to send Telegram: {e}")
-
-    return send_alert
 
 
 async def main():
@@ -101,8 +64,11 @@ async def main():
 
     # Set up alerts
     alert_callback = None
+    telegram_alerts = None
     if not args.dry_run:
-        alert_callback = setup_telegram_alerts()
+        telegram_alerts = TelegramAlerts.from_env()
+        if telegram_alerts:
+            alert_callback = telegram_alerts.as_callback()
 
     # Show initial stats
     wallet_stats = wallet_db.get_stats()
