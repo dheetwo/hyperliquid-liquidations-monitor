@@ -6,14 +6,22 @@ Stores position cache and monitoring state.
 
 import sqlite3
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, TypeVar
 from dataclasses import dataclass
 
 from ..config import Position, Bucket, config
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# Database connection settings
+DB_TIMEOUT = 10.0  # seconds
+DB_RETRIES = 3
+DB_RETRY_BACKOFF = 0.5  # seconds
 
 
 @dataclass
@@ -61,75 +69,123 @@ class PositionDB:
 
     def __init__(self, db_path: Path = None):
         self.db_path = db_path or config.positions_db_path
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.error(f"Failed to create database directory: {e}")
+            raise
         self._init_db()
+
+    def _execute_with_retry(
+        self,
+        operation: Callable[[], T],
+        retries: int = DB_RETRIES,
+        backoff: float = DB_RETRY_BACKOFF,
+    ) -> T:
+        """
+        Execute a database operation with retry logic for locked database.
+
+        Args:
+            operation: Callable that performs the database operation
+            retries: Number of retry attempts
+            backoff: Initial backoff time in seconds (doubles each retry)
+
+        Returns:
+            Result of the operation
+
+        Raises:
+            sqlite3.Error: If all retries fail
+        """
+        last_error = None
+        for attempt in range(retries):
+            try:
+                return operation()
+            except sqlite3.OperationalError as e:
+                last_error = e
+                if "locked" in str(e).lower() and attempt < retries - 1:
+                    wait_time = backoff * (2 ** attempt)
+                    logger.warning(
+                        f"Database locked, retrying in {wait_time:.1f}s "
+                        f"({attempt + 1}/{retries})"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                raise
+            except sqlite3.Error as e:
+                logger.error(f"Database error: {e}")
+                raise
+        raise last_error
 
     def _init_db(self):
         """Initialize database schema."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
 
-            # Main position cache
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS positions (
-                    position_key TEXT PRIMARY KEY,
-                    address TEXT NOT NULL,
-                    token TEXT NOT NULL,
-                    exchange TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    size REAL NOT NULL,
-                    entry_price REAL NOT NULL,
-                    mark_price REAL NOT NULL,
-                    liquidation_price REAL,
-                    position_value REAL NOT NULL,
-                    unrealized_pnl REAL NOT NULL,
-                    leverage REAL NOT NULL,
-                    leverage_type TEXT NOT NULL,
-                    margin_used REAL NOT NULL,
-                    bucket TEXT NOT NULL,
-                    distance_pct REAL,
-                    last_updated TEXT NOT NULL,
-                    alerted_proximity INTEGER DEFAULT 0,
-                    alerted_critical INTEGER DEFAULT 0,
-                    alert_message_id INTEGER,
-                    previous_liq_price REAL,
-                    previous_position_value REAL
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_positions_bucket
-                ON positions(bucket)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_positions_address
-                ON positions(address)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_positions_distance
-                ON positions(distance_pct)
-            """)
+                # Main position cache
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS positions (
+                        position_key TEXT PRIMARY KEY,
+                        address TEXT NOT NULL,
+                        token TEXT NOT NULL,
+                        exchange TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        size REAL NOT NULL,
+                        entry_price REAL NOT NULL,
+                        mark_price REAL NOT NULL,
+                        liquidation_price REAL,
+                        position_value REAL NOT NULL,
+                        unrealized_pnl REAL NOT NULL,
+                        leverage REAL NOT NULL,
+                        leverage_type TEXT NOT NULL,
+                        margin_used REAL NOT NULL,
+                        bucket TEXT NOT NULL,
+                        distance_pct REAL,
+                        last_updated TEXT NOT NULL,
+                        alerted_proximity INTEGER DEFAULT 0,
+                        alerted_critical INTEGER DEFAULT 0,
+                        alert_message_id INTEGER,
+                        previous_liq_price REAL,
+                        previous_position_value REAL
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_positions_bucket
+                    ON positions(bucket)
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_positions_address
+                    ON positions(address)
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_positions_distance
+                    ON positions(distance_pct)
+                """)
 
-            # Position history (for tracking changes over time)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS position_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    position_key TEXT NOT NULL,
-                    mark_price REAL NOT NULL,
-                    distance_pct REAL,
-                    position_value REAL NOT NULL,
-                    timestamp TEXT NOT NULL
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_history_key
-                ON position_history(position_key)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_history_timestamp
-                ON position_history(timestamp)
-            """)
+                # Position history (for tracking changes over time)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS position_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        position_key TEXT NOT NULL,
+                        mark_price REAL NOT NULL,
+                        distance_pct REAL,
+                        position_value REAL NOT NULL,
+                        timestamp TEXT NOT NULL
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_history_key
+                    ON position_history(position_key)
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_history_timestamp
+                    ON position_history(timestamp)
+                """)
 
-            conn.commit()
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Failed to initialize position database: {e}")
+            raise
 
     # -------------------------------------------------------------------------
     # Position CRUD
@@ -159,77 +215,80 @@ class PositionDB:
         # Classify into bucket
         bucket = config.classify_bucket(distance_pct)
 
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        def _do_upsert():
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
+                conn.row_factory = sqlite3.Row
 
-            # Check if exists (to preserve alert state)
-            existing = conn.execute(
-                "SELECT * FROM positions WHERE position_key = ?",
-                (position.key,)
-            ).fetchone()
+                # Check if exists (to preserve alert state)
+                existing = conn.execute(
+                    "SELECT * FROM positions WHERE position_key = ?",
+                    (position.key,)
+                ).fetchone()
 
-            if existing:
-                # Preserve alert state, update position data
-                conn.execute("""
-                    UPDATE positions
-                    SET address = ?, token = ?, exchange = ?, side = ?,
-                        size = ?, entry_price = ?, mark_price = ?,
-                        liquidation_price = ?, position_value = ?,
-                        unrealized_pnl = ?, leverage = ?, leverage_type = ?,
-                        margin_used = ?, bucket = ?, distance_pct = ?,
-                        last_updated = ?,
-                        previous_liq_price = liquidation_price,
-                        previous_position_value = position_value
-                    WHERE position_key = ?
-                """, (
-                    position.address, position.token, position.exchange, position.side,
-                    position.size, position.entry_price, position.mark_price,
-                    position.liquidation_price, position.position_value,
-                    position.unrealized_pnl, position.leverage, position.leverage_type,
-                    position.margin_used, bucket.value, distance_pct,
-                    now, position.key
-                ))
+                if existing:
+                    # Preserve alert state, update position data
+                    conn.execute("""
+                        UPDATE positions
+                        SET address = ?, token = ?, exchange = ?, side = ?,
+                            size = ?, entry_price = ?, mark_price = ?,
+                            liquidation_price = ?, position_value = ?,
+                            unrealized_pnl = ?, leverage = ?, leverage_type = ?,
+                            margin_used = ?, bucket = ?, distance_pct = ?,
+                            last_updated = ?,
+                            previous_liq_price = liquidation_price,
+                            previous_position_value = position_value
+                        WHERE position_key = ?
+                    """, (
+                        position.address, position.token, position.exchange, position.side,
+                        position.size, position.entry_price, position.mark_price,
+                        position.liquidation_price, position.position_value,
+                        position.unrealized_pnl, position.leverage, position.leverage_type,
+                        position.margin_used, bucket.value, distance_pct,
+                        now, position.key
+                    ))
+                    conn.commit()
 
-                return CachedPosition(
-                    position=position,
-                    bucket=bucket,
-                    distance_pct=distance_pct,
-                    last_updated=now,
-                    alerted_proximity=bool(existing["alerted_proximity"]),
-                    alerted_critical=bool(existing["alerted_critical"]),
-                    alert_message_id=existing["alert_message_id"],
-                    previous_liq_price=existing["liquidation_price"],
-                    previous_position_value=existing["position_value"],
-                )
-            else:
-                # New position
-                conn.execute("""
-                    INSERT INTO positions
-                    (position_key, address, token, exchange, side, size,
-                     entry_price, mark_price, liquidation_price, position_value,
-                     unrealized_pnl, leverage, leverage_type, margin_used,
-                     bucket, distance_pct, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    position.key, position.address, position.token, position.exchange,
-                    position.side, position.size, position.entry_price, position.mark_price,
-                    position.liquidation_price, position.position_value,
-                    position.unrealized_pnl, position.leverage, position.leverage_type,
-                    position.margin_used, bucket.value, distance_pct, now
-                ))
+                    return CachedPosition(
+                        position=position,
+                        bucket=bucket,
+                        distance_pct=distance_pct,
+                        last_updated=now,
+                        alerted_proximity=bool(existing["alerted_proximity"]),
+                        alerted_critical=bool(existing["alerted_critical"]),
+                        alert_message_id=existing["alert_message_id"],
+                        previous_liq_price=existing["liquidation_price"],
+                        previous_position_value=existing["position_value"],
+                    )
+                else:
+                    # New position
+                    conn.execute("""
+                        INSERT INTO positions
+                        (position_key, address, token, exchange, side, size,
+                         entry_price, mark_price, liquidation_price, position_value,
+                         unrealized_pnl, leverage, leverage_type, margin_used,
+                         bucket, distance_pct, last_updated)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        position.key, position.address, position.token, position.exchange,
+                        position.side, position.size, position.entry_price, position.mark_price,
+                        position.liquidation_price, position.position_value,
+                        position.unrealized_pnl, position.leverage, position.leverage_type,
+                        position.margin_used, bucket.value, distance_pct, now
+                    ))
+                    conn.commit()
 
-                return CachedPosition(
-                    position=position,
-                    bucket=bucket,
-                    distance_pct=distance_pct,
-                    last_updated=now,
-                )
+                    return CachedPosition(
+                        position=position,
+                        bucket=bucket,
+                        distance_pct=distance_pct,
+                        last_updated=now,
+                    )
 
-            conn.commit()
+        return self._execute_with_retry(_do_upsert)
 
     def get_position(self, key: str) -> Optional[CachedPosition]:
         """Get a single position by key."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT * FROM positions WHERE position_key = ?",
@@ -240,7 +299,7 @@ class PositionDB:
 
     def get_positions_by_bucket(self, bucket: Bucket) -> List[CachedPosition]:
         """Get all positions in a bucket, sorted by distance."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("""
                 SELECT * FROM positions
@@ -252,7 +311,7 @@ class PositionDB:
 
     def get_all_positions(self) -> List[CachedPosition]:
         """Get all positions, sorted by distance."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("""
                 SELECT * FROM positions
@@ -264,7 +323,7 @@ class PositionDB:
     def get_positions_for_address(self, address: str) -> List[CachedPosition]:
         """Get all positions for a specific address."""
         address = address.lower()
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("""
                 SELECT * FROM positions WHERE address = ?
@@ -274,7 +333,7 @@ class PositionDB:
 
     def remove_position(self, key: str):
         """Remove a position from the cache (e.g., closed or liquidated)."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.execute("DELETE FROM positions WHERE position_key = ?", (key,))
             conn.commit()
 
@@ -282,7 +341,7 @@ class PositionDB:
         """Remove positions that haven't been updated recently."""
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
 
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             result = conn.execute(
                 "DELETE FROM positions WHERE last_updated < ?",
                 (cutoff,)
@@ -301,7 +360,7 @@ class PositionDB:
 
     def set_alerted_proximity(self, key: str, message_id: Optional[int] = None):
         """Mark position as having received proximity alert."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.execute("""
                 UPDATE positions
                 SET alerted_proximity = 1, alert_message_id = ?
@@ -311,7 +370,7 @@ class PositionDB:
 
     def set_alerted_critical(self, key: str, message_id: Optional[int] = None):
         """Mark position as having received critical alert."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.execute("""
                 UPDATE positions
                 SET alerted_critical = 1, alert_message_id = ?
@@ -321,7 +380,7 @@ class PositionDB:
 
     def reset_alerts(self, key: str):
         """Reset alert state for a position (e.g., after recovery)."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.execute("""
                 UPDATE positions
                 SET alerted_proximity = 0, alerted_critical = 0,
@@ -338,25 +397,28 @@ class PositionDB:
         """Record a position snapshot for historical tracking."""
         now = datetime.now(timezone.utc).isoformat()
 
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                INSERT INTO position_history
-                (position_key, mark_price, distance_pct, position_value, timestamp)
-                VALUES (?, ?, ?, ?, ?)
-            """, (
-                position.key,
-                position.position.mark_price,
-                position.distance_pct,
-                position.position.position_value,
-                now
-            ))
-            conn.commit()
+        try:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
+                conn.execute("""
+                    INSERT INTO position_history
+                    (position_key, mark_price, distance_pct, position_value, timestamp)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    position.key,
+                    position.position.mark_price,
+                    position.distance_pct,
+                    position.position.position_value,
+                    now
+                ))
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.warning(f"Failed to record position snapshot: {e}")
 
     def prune_history(self, days: int = 7):
         """Remove history older than specified days."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             result = conn.execute(
                 "DELETE FROM position_history WHERE timestamp < ?",
                 (cutoff,)
@@ -375,36 +437,46 @@ class PositionDB:
 
     def get_stats(self) -> PositionStats:
         """Get statistics about the position cache."""
-        with sqlite3.connect(self.db_path) as conn:
-            total = conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
+        try:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
+                total = conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
 
-            critical = conn.execute(
-                "SELECT COUNT(*) FROM positions WHERE bucket = 'critical'"
-            ).fetchone()[0]
+                critical = conn.execute(
+                    "SELECT COUNT(*) FROM positions WHERE bucket = 'critical'"
+                ).fetchone()[0]
 
-            high = conn.execute(
-                "SELECT COUNT(*) FROM positions WHERE bucket = 'high'"
-            ).fetchone()[0]
+                high = conn.execute(
+                    "SELECT COUNT(*) FROM positions WHERE bucket = 'high'"
+                ).fetchone()[0]
 
-            normal = conn.execute(
-                "SELECT COUNT(*) FROM positions WHERE bucket = 'normal'"
-            ).fetchone()[0]
+                normal = conn.execute(
+                    "SELECT COUNT(*) FROM positions WHERE bucket = 'normal'"
+                ).fetchone()[0]
 
-            total_notional = conn.execute(
-                "SELECT COALESCE(SUM(position_value), 0) FROM positions"
-            ).fetchone()[0]
+                total_notional = conn.execute(
+                    "SELECT COALESCE(SUM(position_value), 0) FROM positions"
+                ).fetchone()[0]
 
+                return PositionStats(
+                    total_positions=total,
+                    critical_count=critical,
+                    high_count=high,
+                    normal_count=normal,
+                    total_notional=total_notional,
+                )
+        except sqlite3.Error as e:
+            logger.error(f"Failed to get position stats: {e}")
             return PositionStats(
-                total_positions=total,
-                critical_count=critical,
-                high_count=high,
-                normal_count=normal,
-                total_notional=total_notional,
+                total_positions=0,
+                critical_count=0,
+                high_count=0,
+                normal_count=0,
+                total_notional=0,
             )
 
     def clear(self):
         """Clear all positions (use with caution)."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             conn.execute("DELETE FROM positions")
             conn.execute("DELETE FROM position_history")
             conn.commit()
