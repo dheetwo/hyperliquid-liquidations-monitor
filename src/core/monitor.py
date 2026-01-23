@@ -10,11 +10,21 @@ Main monitoring loop that:
 """
 
 import asyncio
+import heapq
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Callable, Dict, List, Optional, TYPE_CHECKING
 
 from ..config import Position, Bucket, config
+
+
+@dataclass(order=True)
+class QueuedPosition:
+    """Position in the priority queue, ordered by distance to liquidation."""
+    priority: float  # distance_pct (lower = more urgent)
+    next_refresh: datetime = field(compare=False)
+    position_key: str = field(compare=False)
 from ..api.hyperliquid import HyperliquidClient
 from ..api.hyperdash import HyperdashClient
 from ..db.wallet_db import WalletDB
@@ -31,10 +41,17 @@ class Monitor:
     """
     Main monitoring service.
 
-    Implements tiered monitoring where:
-    - Critical positions (<=0.125% to liq) are refreshed fastest
-    - High positions (0.125-0.25%) are refreshed medium
-    - Normal positions (>0.25%) are refreshed slowly
+    Implements priority-based monitoring where positions are processed
+    in strict order of urgency (distance to liquidation). Uses a min-heap
+    to always process the most critical position first.
+
+    Refresh intervals by bucket:
+    - Critical (<=0.125%): every 0.5s
+    - High (0.125-0.25%): every 3s
+    - Normal (>0.25%): every 30s
+
+    Alerts are sent asynchronously (fire-and-forget) to avoid blocking
+    the processing loop while waiting for Telegram responses.
 
     Discovery runs periodically to find new positions.
     """
@@ -64,12 +81,12 @@ class Monitor:
         self._fetcher: Optional[PositionFetcher] = None
         self._running = False
 
+        # Priority queue for position processing
+        self._queue: List[QueuedPosition] = []
+
         # Timing state
         self._last_price_refresh = datetime.min.replace(tzinfo=timezone.utc)
         self._last_discovery = datetime.min.replace(tzinfo=timezone.utc)
-        self._last_critical_refresh = datetime.min.replace(tzinfo=timezone.utc)
-        self._last_high_refresh = datetime.min.replace(tzinfo=timezone.utc)
-        self._last_normal_refresh = datetime.min.replace(tzinfo=timezone.utc)
 
         # Discovery interval (adaptive)
         self._discovery_interval = timedelta(minutes=30)
@@ -86,6 +103,7 @@ class Monitor:
         # Initial discovery - don't crash on failure, continue with empty cache
         try:
             await self._run_discovery()
+            self._rebuild_queue()
         except Exception as e:
             logger.error(f"Initial discovery failed: {e}, continuing with empty cache")
             # Discovery will be retried in the main loop
@@ -106,7 +124,7 @@ class Monitor:
             self._client = None
 
     async def _main_loop(self):
-        """Main monitoring loop."""
+        """Main monitoring loop using priority queue."""
         while self._running:
             now = datetime.now(timezone.utc)
 
@@ -116,28 +134,18 @@ class Monitor:
                     await self._refresh_prices()
                     self._last_price_refresh = now
 
-                # 2. Process critical bucket (most frequently)
-                if (now - self._last_critical_refresh).total_seconds() >= config.critical_refresh_sec:
-                    await self._process_bucket(Bucket.CRITICAL)
-                    self._last_critical_refresh = now
+                # 2. Process next eligible position (highest priority first)
+                processed = await self._process_next_position(now)
 
-                # 3. Process high bucket
-                if (now - self._last_high_refresh).total_seconds() >= config.high_refresh_sec:
-                    await self._process_bucket(Bucket.HIGH)
-                    self._last_high_refresh = now
-
-                # 4. Process normal bucket
-                if (now - self._last_normal_refresh).total_seconds() >= config.normal_refresh_sec:
-                    await self._process_bucket(Bucket.NORMAL)
-                    self._last_normal_refresh = now
-
-                # 5. Run discovery periodically
+                # 3. Run discovery periodically
                 if (now - self._last_discovery) >= self._discovery_interval:
                     await self._run_discovery()
+                    self._rebuild_queue()
                     self._last_discovery = now
 
-                # Small sleep to prevent busy-waiting
-                await asyncio.sleep(0.1)
+                # Brief sleep if nothing was processed
+                if not processed:
+                    await asyncio.sleep(0.05)
 
             except asyncio.CancelledError:
                 break
@@ -150,34 +158,84 @@ class Monitor:
         if self._fetcher:
             await self._fetcher.refresh_mark_prices()
 
-    async def _process_bucket(self, bucket: Bucket):
+    async def _process_next_position(self, now: datetime) -> bool:
         """
-        Process all positions in a bucket.
+        Process the highest priority eligible position.
 
-        - Updates distances
-        - Checks for alerts
-        - Reclassifies into appropriate buckets
+        Pops from the priority queue, processes if eligible, and requeues
+        with updated priority based on new distance.
+
+        Returns:
+            True if a position was processed, False otherwise
         """
-        positions = self.position_db.get_positions_by_bucket(bucket)
-        if not positions:
-            return
+        while self._queue:
+            item = heapq.heappop(self._queue)
 
-        logger.debug(f"Processing {len(positions)} {bucket.value} positions")
+            # Check if eligible for refresh
+            if item.next_refresh > now:
+                heapq.heappush(self._queue, item)  # Not ready, push back
+                return False
 
-        for cached in positions:
+            # Get cached position from DB
+            cached = self.position_db.get_position(item.position_key)
+            if not cached:
+                continue  # Position no longer exists, skip
+
+            # Process and get new distance
             try:
-                await self._process_position(cached)
+                new_distance = await self._process_position(cached)
             except Exception as e:
-                logger.warning(f"Error processing {cached.key}: {e}")
+                logger.warning(f"Error processing {item.position_key}: {e}")
+                new_distance = cached.distance_pct  # Keep old distance on error
 
-    async def _process_position(self, cached: CachedPosition):
+            # Requeue with updated priority and refresh time
+            new_bucket = config.classify_bucket(new_distance)
+            refresh_sec = self._get_refresh_interval(new_bucket)
+
+            heapq.heappush(self._queue, QueuedPosition(
+                priority=new_distance if new_distance is not None else 999,
+                next_refresh=now + timedelta(seconds=refresh_sec),
+                position_key=item.position_key,
+            ))
+            return True
+
+        return False
+
+    def _get_refresh_interval(self, bucket: Bucket) -> float:
+        """Get refresh interval in seconds for a bucket."""
+        if bucket == Bucket.CRITICAL:
+            return config.critical_refresh_sec
+        elif bucket == Bucket.HIGH:
+            return config.high_refresh_sec
+        return config.normal_refresh_sec
+
+    def _rebuild_queue(self):
+        """Rebuild priority queue from all positions in DB."""
+        self._queue.clear()
+        now = datetime.now(timezone.utc)
+
+        for bucket in [Bucket.CRITICAL, Bucket.HIGH, Bucket.NORMAL]:
+            for cached in self.position_db.get_positions_by_bucket(bucket):
+                distance = cached.distance_pct if cached.distance_pct is not None else 999
+                heapq.heappush(self._queue, QueuedPosition(
+                    priority=distance,
+                    next_refresh=now,  # Eligible immediately after discovery
+                    position_key=cached.key,
+                ))
+
+        logger.debug(f"Priority queue rebuilt with {len(self._queue)} positions")
+
+    async def _process_position(self, cached: CachedPosition) -> Optional[float]:
         """
         Process a single position.
 
         - Update mark price
         - Recalculate distance
-        - Check for alerts
-        - Update bucket classification
+        - Check for alerts (non-blocking)
+        - Update database
+
+        Returns:
+            New distance to liquidation (or None if unavailable)
         """
         position = cached.position
 
@@ -188,20 +246,21 @@ class Monitor:
 
         # Calculate distance
         distance = position.distance_to_liq()
-        new_bucket = config.classify_bucket(distance)
 
-        # Check for proximity alert
+        # Check for alerts (non-blocking - fire and forget)
         if distance is not None:
             if distance <= config.proximity_alert_pct and not cached.alerted_proximity:
-                await self._send_proximity_alert(position, distance)
+                self._send_proximity_alert_async(position, distance)
                 self.position_db.set_alerted_proximity(cached.key)
 
             if distance <= config.critical_alert_pct and not cached.alerted_critical:
-                await self._send_critical_alert(position, distance)
+                self._send_critical_alert_async(position, distance)
                 self.position_db.set_alerted_critical(cached.key)
 
         # Update position in database
         self.position_db.upsert_position(position, distance)
+
+        return distance
 
     async def _run_discovery(self):
         """
@@ -395,6 +454,62 @@ class Monitor:
                 )
             except Exception as e:
                 logger.error(f"Failed to send critical alert: {e}")
+        else:
+            logger.info(
+                f"IMMINENT LIQUIDATION: {position.token} {position.side} "
+                f"${position.position_value:,.0f} at {distance:.3f}%"
+            )
+
+    def _send_proximity_alert_async(self, position: Position, distance: float):
+        """Send proximity alert without blocking (fire and forget)."""
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] APPROACHING LIQUIDATION: {position.token} {position.side} "
+                f"${position.position_value:,.0f} at {distance:.2f}%"
+            )
+        elif self.telegram_alerts:
+            try:
+                self.telegram_alerts.send_proximity_alert_async(
+                    token=position.token,
+                    side=position.side,
+                    address=position.address,
+                    distance_pct=distance,
+                    liq_price=position.liquidation_price,
+                    mark_price=position.mark_price,
+                    position_value=position.position_value,
+                    is_isolated=position.leverage_type.lower() == "isolated",
+                    exchange=position.exchange,
+                )
+            except Exception as e:
+                logger.error(f"Failed to queue proximity alert: {e}")
+        else:
+            logger.info(
+                f"APPROACHING LIQUIDATION: {position.token} {position.side} "
+                f"${position.position_value:,.0f} at {distance:.2f}%"
+            )
+
+    def _send_critical_alert_async(self, position: Position, distance: float):
+        """Send critical alert without blocking (fire and forget)."""
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] IMMINENT LIQUIDATION: {position.token} {position.side} "
+                f"${position.position_value:,.0f} at {distance:.3f}%"
+            )
+        elif self.telegram_alerts:
+            try:
+                self.telegram_alerts.send_critical_alert_async(
+                    token=position.token,
+                    side=position.side,
+                    address=position.address,
+                    distance_pct=distance,
+                    liq_price=position.liquidation_price,
+                    mark_price=position.mark_price,
+                    position_value=position.position_value,
+                    is_isolated=position.leverage_type.lower() == "isolated",
+                    exchange=position.exchange,
+                )
+            except Exception as e:
+                logger.error(f"Failed to queue critical alert: {e}")
         else:
             logger.info(
                 f"IMMINENT LIQUIDATION: {position.token} {position.side} "

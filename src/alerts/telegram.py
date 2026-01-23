@@ -11,6 +11,7 @@ Alert types:
 
 import logging
 import time
+import threading
 import requests
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -234,6 +235,26 @@ class TelegramAlerts:
             logger.error("Unexpected error sending Telegram message")
             return None
 
+    def _send_message_async(self, text: str, skip_rate_limit: bool = False):
+        """
+        Send message without blocking. Fire and forget.
+
+        Spawns a background thread to send the message so the caller
+        can continue immediately without waiting for Telegram response.
+
+        Args:
+            text: Message text (HTML formatted)
+            skip_rate_limit: If True, skip rate limit check
+        """
+        def _send():
+            try:
+                self._send_message(text, skip_rate_limit=skip_rate_limit)
+            except Exception as e:
+                logger.error(f"Async send failed: {e}")
+
+        thread = threading.Thread(target=_send, daemon=True)
+        thread.start()
+
     def _truncate_message(self, text: str) -> str:
         """Truncate message to Telegram's character limit."""
         if len(text) > self.config.max_message_length:
@@ -319,6 +340,65 @@ class TelegramAlerts:
 
         return message_id
 
+    def send_proximity_alert_async(
+        self,
+        token: str,
+        side: str,
+        address: str,
+        distance_pct: float,
+        liq_price: float,
+        mark_price: float,
+        position_value: float,
+        is_isolated: bool = False,
+        exchange: str = "main",
+    ):
+        """
+        Send proximity alert without blocking.
+
+        Same as send_proximity_alert but doesn't wait for Telegram response.
+        Use this for time-critical processing where you need to continue
+        immediately to the next position.
+        """
+        position_key = f"{address}:{token}:{exchange}:{side}"
+        if not self._can_alert_position(position_key):
+            logger.debug(f"Proximity alert for {token} skipped (cooldown)")
+            return
+
+        # Record alert immediately (before async send)
+        self._record_position_alert(position_key)
+
+        side_str = "L" if side == "Long" else "S"
+        margin_type = "Iso" if is_isolated else "Cross"
+
+        if exchange and exchange != "main":
+            token_display = f"{exchange}:{token}"
+        else:
+            token_display = token
+
+        if position_value >= 1_000_000:
+            value_str = f"${position_value / 1_000_000:.1f}M"
+        else:
+            value_str = f"${position_value / 1_000:.0f}K"
+
+        def format_price(p: float) -> str:
+            if p >= 1000:
+                return f"${p:,.0f}"
+            elif p >= 1:
+                return f"${p:.2f}"
+            else:
+                return f"${p:.6f}"
+
+        hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+        addr_display = f"{address[:6]}...{address[-4:]}"
+
+        lines = [
+            f"⚠️ {token_display} | {value_str} {margin_type}",
+            f"<b>{distance_pct:.2f}%</b> away @ {format_price(liq_price)} | <a href=\"{hypurrscan_url}\">{addr_display}</a>",
+        ]
+
+        message = "\n".join(lines)
+        self._send_message_async(message)
+
     def send_critical_alert(
         self,
         token: str,
@@ -387,6 +467,57 @@ class TelegramAlerts:
 
         message = "\n".join(lines)
         return self._send_message(message, skip_rate_limit=True)
+
+    def send_critical_alert_async(
+        self,
+        token: str,
+        side: str,
+        address: str,
+        distance_pct: float,
+        liq_price: float,
+        mark_price: float,
+        position_value: float,
+        is_isolated: bool = False,
+        exchange: str = "main",
+    ):
+        """
+        Send critical alert without blocking.
+
+        Same as send_critical_alert but doesn't wait for Telegram response.
+        Use this for time-critical processing where you need to continue
+        immediately to the next position.
+        """
+        side_str = "L" if side == "Long" else "S"
+        margin_type = "Iso" if is_isolated else "Cross"
+
+        if exchange and exchange != "main":
+            token_display = f"{exchange}:{token}"
+        else:
+            token_display = token
+
+        if position_value >= 1_000_000:
+            value_str = f"${position_value / 1_000_000:.1f}M"
+        else:
+            value_str = f"${position_value / 1_000:.0f}K"
+
+        def format_price(p: float) -> str:
+            if p >= 1000:
+                return f"${p:,.0f}"
+            elif p >= 1:
+                return f"${p:.2f}"
+            else:
+                return f"${p:.6f}"
+
+        hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+        addr_display = f"{address[:6]}...{address[-4:]}"
+
+        lines = [
+            f"🚨 {token_display} | {value_str} {margin_type}",
+            f"<b>{distance_pct:.2f}%</b> away @ {format_price(liq_price)} | <a href=\"{hypurrscan_url}\">{addr_display}</a>",
+        ]
+
+        message = "\n".join(lines)
+        self._send_message_async(message, skip_rate_limit=True)
 
     def send_full_liquidation_alert(
         self,
