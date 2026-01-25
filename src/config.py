@@ -223,7 +223,8 @@ class Config:
     max_concurrent_requests: int = 10
 
     # Delay between API requests (seconds)
-    request_delay_sec: float = 0.1  # 100ms between requests
+    # With 10 concurrent requests and 0.15s delay, max rate is ~20-25 req/s
+    request_delay_sec: float = 0.15  # 150ms between requests
 
     # Rate limiting backoff (seconds)
     rate_limit_backoff_sec: float = 2.0
