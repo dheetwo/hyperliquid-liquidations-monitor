@@ -89,7 +89,13 @@ class HyperliquidClient:
                             logger.error(f"API error {response.status}: {await response.text()}")
                             return None
 
-                        return await response.json()
+                        result = await response.json()
+
+                    # Delay AFTER request completes but still inside semaphore
+                    # This ensures we don't exceed ~10 req/sec (10 concurrent * 0.1s delay)
+                    await asyncio.sleep(self.request_delay)
+
+                    return result
 
             except aiohttp.ClientError as e:
                 logger.error(f"Request error (attempt {attempt + 1}): {e}")
