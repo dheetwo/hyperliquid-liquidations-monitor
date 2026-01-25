@@ -519,6 +519,65 @@ class TelegramAlerts:
         message = "\n".join(lines)
         self._send_message_async(message, skip_rate_limit=True)
 
+    def send_collateral_added_alert_async(
+        self,
+        token: str,
+        side: str,
+        address: str,
+        distance_pct: float,
+        liq_price: float,
+        position_value: float,
+        previous_bucket: str,
+        is_isolated: bool = False,
+        exchange: str = "main",
+    ):
+        """
+        Send collateral added alert without blocking.
+
+        Sent when a position recovers from HIGH/CRITICAL due to collateral addition.
+
+        Args:
+            token: Token symbol
+            side: "Long" or "Short"
+            address: Wallet address
+            distance_pct: New distance to liquidation after recovery
+            liq_price: New liquidation price
+            position_value: Position value in USD
+            previous_bucket: Previous bucket name ("HIGH" or "CRITICAL")
+            is_isolated: Whether isolated margin
+            exchange: Exchange name (default: "main")
+        """
+        margin_type = "Iso" if is_isolated else "Cross"
+
+        if exchange and exchange != "main":
+            token_display = f"{exchange}:{token}"
+        else:
+            token_display = token
+
+        if position_value >= 1_000_000:
+            value_str = f"${position_value / 1_000_000:.1f}M"
+        else:
+            value_str = f"${position_value / 1_000:.0f}K"
+
+        def format_price(p: float) -> str:
+            if p >= 1000:
+                return f"${p:,.0f}"
+            elif p >= 1:
+                return f"${p:.2f}"
+            else:
+                return f"${p:.6f}"
+
+        hypurrscan_url = f"https://hypurrscan.io/address/{address}"
+        addr_display = f"{address[:6]}...{address[-4:]}"
+
+        lines = [
+            f"🟢 {token_display} | {value_str} {margin_type} +COLLATERAL",
+            f"<b>{distance_pct:.2f}%</b> away @ {format_price(liq_price)} | <a href=\"{hypurrscan_url}\">{addr_display}</a>",
+        ]
+
+        message = "\n".join(lines)
+        self._send_message_async(message)
+
     def send_full_liquidation_alert(
         self,
         token: str,

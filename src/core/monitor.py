@@ -231,36 +231,124 @@ class Monitor:
 
         - Update mark price
         - Recalculate distance
-        - Check for alerts (non-blocking)
+        - Check for state transitions and send alerts
         - Update database
+
+        Alert rules (state-based):
+        - Transition INTO greater danger (NORMAL→HIGH, HIGH→CRITICAL, NORMAL→CRITICAL): Alert
+        - Transition INTO less danger: No alert, UNLESS collateral was added while in HIGH/CRITICAL
 
         Returns:
             New distance to liquidation (or None if unavailable)
         """
         position = cached.position
+        previous_bucket = cached.bucket
 
         # Get current mark price
         mark_price = self._fetcher.get_mark_price(position.token, position.exchange)
         if mark_price:
             position.mark_price = mark_price
 
-        # Calculate distance
+        # Calculate distance and new bucket
         distance = position.distance_to_liq()
+        new_bucket = config.classify_bucket(distance)
 
-        # Check for alerts (non-blocking - fire and forget)
+        # Check for state transitions and send alerts
         if distance is not None:
-            if distance <= config.proximity_alert_pct and not cached.alerted_proximity:
-                self._send_proximity_alert_async(position, distance)
-                self.position_db.set_alerted_proximity(cached.key)
-
-            if distance <= config.critical_alert_pct and not cached.alerted_critical:
-                self._send_critical_alert_async(position, distance)
-                self.position_db.set_alerted_critical(cached.key)
+            self._check_bucket_transitions(
+                position=position,
+                distance=distance,
+                previous_bucket=previous_bucket,
+                new_bucket=new_bucket,
+                previous_liq_price=cached.previous_liq_price,
+            )
 
         # Update position in database
         self.position_db.upsert_position(position, distance)
 
         return distance
+
+    def _check_bucket_transitions(
+        self,
+        position: Position,
+        distance: float,
+        previous_bucket: Bucket,
+        new_bucket: Bucket,
+        previous_liq_price: Optional[float],
+    ):
+        """
+        Check for bucket state transitions and send appropriate alerts.
+
+        Alerts on transitions INTO greater danger:
+        - NORMAL → HIGH: Proximity alert (approaching liquidation)
+        - HIGH → CRITICAL: Critical alert (imminent liquidation)
+        - NORMAL → CRITICAL: Critical alert (imminent liquidation)
+
+        Alerts on recovery from CRITICAL (only if collateral was added):
+        - CRITICAL → HIGH/NORMAL: Collateral added notification
+        """
+        # Transition INTO greater danger
+        if new_bucket == Bucket.HIGH and previous_bucket == Bucket.NORMAL:
+            # NORMAL → HIGH: Approaching liquidation
+            self._send_proximity_alert_async(position, distance)
+
+        elif new_bucket == Bucket.CRITICAL and previous_bucket in (Bucket.NORMAL, Bucket.HIGH):
+            # NORMAL/HIGH → CRITICAL: Imminent liquidation
+            self._send_critical_alert_async(position, distance)
+
+        # Transition OUT of CRITICAL (check for collateral addition)
+        elif self._is_critical_recovery(previous_bucket, new_bucket):
+            # Was in CRITICAL, now safer - check if collateral was added
+            if self._detected_collateral_addition(position, previous_liq_price):
+                self._send_collateral_added_alert_async(
+                    position=position,
+                    distance=distance,
+                    previous_bucket=previous_bucket,
+                )
+
+    def _is_critical_recovery(self, previous_bucket: Bucket, new_bucket: Bucket) -> bool:
+        """Check if this is a recovery from CRITICAL to a safer state."""
+        return (
+            previous_bucket == Bucket.CRITICAL
+            and new_bucket in (Bucket.HIGH, Bucket.NORMAL)
+        )
+
+    def _detected_collateral_addition(
+        self,
+        position: Position,
+        previous_liq_price: Optional[float],
+    ) -> bool:
+        """
+        Detect if collateral was added based on liquidation price change.
+
+        When collateral is added:
+        - For LONG: liq price moves DOWN (further from mark price)
+        - For SHORT: liq price moves UP (further from mark price)
+
+        Returns:
+            True if collateral addition detected
+        """
+        if previous_liq_price is None or position.liquidation_price is None:
+            return False
+        if previous_liq_price <= 0:
+            return False
+
+        # Calculate percentage change in liquidation price
+        liq_price_change_pct = abs(
+            (position.liquidation_price - previous_liq_price) / previous_liq_price * 100
+        )
+
+        # Must exceed minimum threshold to be considered significant
+        if liq_price_change_pct < config.collateral_change_min_pct:
+            return False
+
+        # Check direction of change
+        if position.side.lower() == "long":
+            # For longs, liq price should move DOWN (lower = safer)
+            return position.liquidation_price < previous_liq_price
+        else:
+            # For shorts, liq price should move UP (higher = safer)
+            return position.liquidation_price > previous_liq_price
 
     async def _run_discovery(self):
         """
@@ -514,6 +602,40 @@ class Monitor:
             logger.info(
                 f"IMMINENT LIQUIDATION: {position.token} {position.side} "
                 f"${position.position_value:,.0f} at {distance:.3f}%"
+            )
+
+    def _send_collateral_added_alert_async(
+        self,
+        position: Position,
+        distance: float,
+        previous_bucket: Bucket,
+    ):
+        """Send collateral added alert without blocking (fire and forget)."""
+        bucket_name = previous_bucket.value.upper()
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] COLLATERAL ADDED: {position.token} {position.side} "
+                f"${position.position_value:,.0f} recovered from {bucket_name} to {distance:.2f}%"
+            )
+        elif self.telegram_alerts:
+            try:
+                self.telegram_alerts.send_collateral_added_alert_async(
+                    token=position.token,
+                    side=position.side,
+                    address=position.address,
+                    distance_pct=distance,
+                    liq_price=position.liquidation_price,
+                    position_value=position.position_value,
+                    previous_bucket=bucket_name,
+                    is_isolated=position.leverage_type.lower() == "isolated",
+                    exchange=position.exchange,
+                )
+            except Exception as e:
+                logger.error(f"Failed to queue collateral added alert: {e}")
+        else:
+            logger.info(
+                f"COLLATERAL ADDED: {position.token} {position.side} "
+                f"${position.position_value:,.0f} recovered from {bucket_name} to {distance:.2f}%"
             )
 
 
