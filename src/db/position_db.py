@@ -32,9 +32,10 @@ class CachedPosition:
     distance_pct: Optional[float]
     last_updated: str
 
-    # Alert state
-    alerted_proximity: bool = False
-    alerted_critical: bool = False
+    # Alert state (state-based: tracks last bucket where alert was sent)
+    last_alerted_bucket: Bucket = Bucket.NORMAL
+    alerted_proximity: bool = False  # Legacy, unused
+    alerted_critical: bool = False   # Legacy, unused
     alert_message_id: Optional[int] = None
 
     # Change detection
@@ -146,9 +147,17 @@ class PositionDB:
                         alerted_critical INTEGER DEFAULT 0,
                         alert_message_id INTEGER,
                         previous_liq_price REAL,
-                        previous_position_value REAL
+                        previous_position_value REAL,
+                        last_alerted_bucket TEXT DEFAULT 'normal'
                     )
                 """)
+                # Migration: Add last_alerted_bucket column if it doesn't exist
+                try:
+                    conn.execute("""
+                        ALTER TABLE positions ADD COLUMN last_alerted_bucket TEXT DEFAULT 'normal'
+                    """)
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_positions_bucket
                     ON positions(bucket)
@@ -248,11 +257,23 @@ class PositionDB:
                     ))
                     conn.commit()
 
+                    # Read last_alerted_bucket from DB, default to NORMAL if NULL
+                    try:
+                        last_alerted_str = existing["last_alerted_bucket"]
+                    except (KeyError, IndexError):
+                        last_alerted_str = "normal"
+                    last_alerted_str = last_alerted_str or "normal"
+                    try:
+                        last_alerted_bucket = Bucket(last_alerted_str)
+                    except ValueError:
+                        last_alerted_bucket = Bucket.NORMAL
+
                     return CachedPosition(
                         position=position,
                         bucket=bucket,
                         distance_pct=distance_pct,
                         last_updated=now,
+                        last_alerted_bucket=last_alerted_bucket,
                         alerted_proximity=bool(existing["alerted_proximity"]),
                         alerted_critical=bool(existing["alerted_critical"]),
                         alert_message_id=existing["alert_message_id"],
@@ -389,6 +410,25 @@ class PositionDB:
             """, (key,))
             conn.commit()
 
+    def set_last_alerted_bucket(self, key: str, bucket: Bucket):
+        """
+        Update the last_alerted_bucket for a position.
+
+        This tracks which danger level we last sent an alert for.
+        Used by state-based alert logic to detect transitions.
+
+        Args:
+            key: Position key
+            bucket: The bucket at which an alert was sent (or NORMAL on recovery)
+        """
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
+            conn.execute("""
+                UPDATE positions
+                SET last_alerted_bucket = ?
+                WHERE position_key = ?
+            """, (bucket.value, key))
+            conn.commit()
+
     # -------------------------------------------------------------------------
     # History
     # -------------------------------------------------------------------------
@@ -504,11 +544,23 @@ class PositionDB:
             margin_used=row["margin_used"],
         )
 
+        # Read last_alerted_bucket from DB, default to NORMAL if NULL
+        try:
+            last_alerted_str = row["last_alerted_bucket"]
+        except (KeyError, IndexError):
+            last_alerted_str = "normal"
+        last_alerted_str = last_alerted_str or "normal"
+        try:
+            last_alerted_bucket = Bucket(last_alerted_str)
+        except ValueError:
+            last_alerted_bucket = Bucket.NORMAL
+
         return CachedPosition(
             position=position,
             bucket=Bucket(row["bucket"]),
             distance_pct=row["distance_pct"],
             last_updated=row["last_updated"],
+            last_alerted_bucket=last_alerted_bucket,
             alerted_proximity=bool(row["alerted_proximity"]),
             alerted_critical=bool(row["alerted_critical"]),
             alert_message_id=row["alert_message_id"],
