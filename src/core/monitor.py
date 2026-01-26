@@ -236,13 +236,12 @@ class Monitor:
 
         Alert rules (state-based):
         - Transition INTO greater danger (NORMAL→HIGH, HIGH→CRITICAL, NORMAL→CRITICAL): Alert
-        - Transition INTO less danger: No alert, UNLESS collateral was added while in HIGH/CRITICAL
+        - Transition INTO less danger: No alert, UNLESS collateral was added while in CRITICAL
 
         Returns:
             New distance to liquidation (or None if unavailable)
         """
         position = cached.position
-        previous_bucket = cached.bucket
 
         # Get current mark price
         mark_price = self._fetcher.get_mark_price(position.token, position.exchange)
@@ -254,13 +253,13 @@ class Monitor:
         new_bucket = config.classify_bucket(distance)
 
         # Check for state transitions and send alerts
+        # Use last_alerted_bucket (not current bucket) to detect transitions
         if distance is not None:
             self._check_bucket_transitions(
+                cached=cached,
                 position=position,
                 distance=distance,
-                previous_bucket=previous_bucket,
                 new_bucket=new_bucket,
-                previous_liq_price=cached.previous_liq_price,
             )
 
         # Update position in database
@@ -270,48 +269,57 @@ class Monitor:
 
     def _check_bucket_transitions(
         self,
+        cached: CachedPosition,
         position: Position,
         distance: float,
-        previous_bucket: Bucket,
         new_bucket: Bucket,
-        previous_liq_price: Optional[float],
     ):
         """
         Check for bucket state transitions and send appropriate alerts.
 
-        Alerts on transitions INTO greater danger:
+        Uses last_alerted_bucket to track which danger level we last alerted at.
+        This allows re-alerting when positions recover and re-enter danger zones.
+
+        Alerts on transitions INTO greater danger (vs last_alerted_bucket):
         - NORMAL → HIGH: Proximity alert (approaching liquidation)
         - HIGH → CRITICAL: Critical alert (imminent liquidation)
         - NORMAL → CRITICAL: Critical alert (imminent liquidation)
 
-        Alerts on recovery from CRITICAL (only if collateral was added):
+        On recovery from CRITICAL (only if collateral was added):
         - CRITICAL → HIGH/NORMAL: Collateral added notification
+
+        On any recovery to safer bucket:
+        - Updates last_alerted_bucket to allow future re-alerting
         """
-        # Transition INTO greater danger
-        if new_bucket == Bucket.HIGH and previous_bucket == Bucket.NORMAL:
-            # NORMAL → HIGH: Approaching liquidation
-            self._send_proximity_alert_async(position, distance)
+        last_alerted = cached.last_alerted_bucket
+        danger_level = {Bucket.NORMAL: 0, Bucket.HIGH: 1, Bucket.CRITICAL: 2}
 
-        elif new_bucket == Bucket.CRITICAL and previous_bucket in (Bucket.NORMAL, Bucket.HIGH):
-            # NORMAL/HIGH → CRITICAL: Imminent liquidation
-            self._send_critical_alert_async(position, distance)
+        # Transition INTO greater danger (compared to last alert level)
+        if danger_level[new_bucket] > danger_level[last_alerted]:
+            if new_bucket == Bucket.HIGH:
+                # Entering HIGH zone: Approaching liquidation
+                self._send_proximity_alert_async(position, distance)
+                self.position_db.set_last_alerted_bucket(cached.key, Bucket.HIGH)
 
-        # Transition OUT of CRITICAL (check for collateral addition)
-        elif self._is_critical_recovery(previous_bucket, new_bucket):
-            # Was in CRITICAL, now safer - check if collateral was added
-            if self._detected_collateral_addition(position, previous_liq_price):
-                self._send_collateral_added_alert_async(
-                    position=position,
-                    distance=distance,
-                    previous_bucket=previous_bucket,
-                )
+            elif new_bucket == Bucket.CRITICAL:
+                # Entering CRITICAL zone: Imminent liquidation
+                self._send_critical_alert_async(position, distance)
+                self.position_db.set_last_alerted_bucket(cached.key, Bucket.CRITICAL)
 
-    def _is_critical_recovery(self, previous_bucket: Bucket, new_bucket: Bucket) -> bool:
-        """Check if this is a recovery from CRITICAL to a safer state."""
-        return (
-            previous_bucket == Bucket.CRITICAL
-            and new_bucket in (Bucket.HIGH, Bucket.NORMAL)
-        )
+        # Transition INTO less danger (recovery)
+        elif danger_level[new_bucket] < danger_level[last_alerted]:
+            # Check for collateral addition (only from CRITICAL)
+            if last_alerted == Bucket.CRITICAL:
+                if self._detected_collateral_addition(position, cached.previous_liq_price):
+                    self._send_collateral_added_alert_async(
+                        position=position,
+                        distance=distance,
+                        previous_bucket=last_alerted,
+                    )
+
+            # Update last_alerted_bucket to new (safer) level
+            # This allows re-alerting if position re-enters danger
+            self.position_db.set_last_alerted_bucket(cached.key, new_bucket)
 
     def _detected_collateral_addition(
         self,
